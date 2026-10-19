@@ -218,7 +218,7 @@ folders(id, account_id, path, delimiter, special_use NULL /* inbox sent drafts t
   UNIQUE(account_id, path))
 messages(id, account_id, folder_id, uid, gm_msgid NULL, gm_thrid NULL, message_id, in_reply_to NULL, refs NULL,
   gm_labels_json NULL, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
-  date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded */,
+  date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted (hidden, SPEC_GAPS G19) */,
   has_attach, preview, body_state /* none | text | full */, UNIQUE(folder_id, uid))
 bodies(message_id, text_plain, text_html, fetched_at)
 attachments(id, message_id, part_id, filename, mime, size, content_id NULL, is_inline)

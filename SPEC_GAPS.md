@@ -132,4 +132,29 @@ Spec A5 says Node 20+. The pinned Vite 8 plugin and Vitest 5 need Node 22.12 or 
 ## G18. AppError codes — Open (blocks M2)
 Section 3 says `AppError.code` is "a fixed enum" but does not list its members. A proposed list goes to the owner at the start of M2, before the first command is added.
 
+## G19. `\Deleted` has no bit in `messages.flags` — Resolved 2026-10-19
+Invariant 8 says messages flagged `\Deleted` on the server are hidden in every view. Section 9 also leaves some messages "flagged and hidden" when the server has no UIDPLUS. But the section 4 `flags` column listed only bits 0–4, so the store had no way to know a row is `\Deleted`.
+- The owner chose **bit 5 = `\Deleted` on the server**. Every list and search query filters `flags & 32 = 0`. No new column.
+- Section 4 was amended to match.
+
+## G20. FTS external-content source — Resolved by interpretation (owner to ratify)
+Section 10 indexes subject, from, to/cc and body text. Body text is in `bodies` and the headers are in `messages`. An FTS5 external-content table reads from one source, so:
+- `message_fts` (columns `subject`, `sender`, `recipients`, `body`) uses the view `message_fts_content` (`messages LEFT JOIN bodies`) as its content. A view is not a table or a column. It is the only way to give FTS5 one source that spans the two tables.
+- Triggers on `messages` and `bodies` keep the index in step, including cascaded deletes and upserts.
+- `to_json`, `cc_json` and `reply_to_json` hold JSON arrays of `[name, addr]` pairs, with no keys. Only names and addresses reach the index, and FTS5's content consistency check works. That check fails when the view uses `json_each` or `json_tree`.
+
+## G21. Nullability and "not set yet" values — Resolved by interpretation (owner to ratify)
+Section 4 says types are the builder's job but marks some columns `NULL`. M1 reads that literally:
+- Every column the spec marks `NULL` is nullable, and every other column is `NOT NULL`.
+- "Not set yet" is written as `''` or `0`. Examples: `uidvalidity` and `synced_at` stay 0 until a folder is first selected (0 is not a valid UIDVALIDITY); `oauth_client_id` is `''` for password accounts; `text_html` is `''` for plain-only mail; `last_error` is `''` when there is no error.
+- The migration test checks this nullability against the spec column by column.
+
+## G22. Two folder references without a foreign key — Resolved by interpretation (owner to ratify)
+- `pending_ops.folder_id` has no foreign key. A queued folder delete (M6) must outlive the local folder row it deletes optimistically, and a cascade would drop the op before it reached the server. The UIDVALIDITY purge drops the folder's ops explicitly (section 12).
+- `snoozes.origin_folder_id` has no foreign key either, so that deleting the origin folder neither deletes the snooze nor is blocked by it. Where the message goes back to in that case is M9's question.
+- Every other reference has a foreign key: `ON DELETE CASCADE` to its owner, or `NO ACTION` for `messages.thread_id` and `outbox.identity_id`.
+
+## G23. `bcc:` search has no stored column — Open (blocks the `bcc:` operator in M9 only)
+Section 10 lists `bcc:` (Sent and Drafts only), but `messages` has no Bcc column. Bcc is never written to the header (section 7), so the Sent copy on the server has none. Bcc exists only in `drafts.content_json` and `outbox.envelope_json`. To be decided before M9.
+
 G1 update (2026-10-19): the owner installed Rust (1.99.1, MSVC host) and the VS 2022 Build Tools. Docker is not installed locally, by the owner's choice; the Stalwart tests run in CI (GitHub's Linux runners), and the fake transport covers local runs.
