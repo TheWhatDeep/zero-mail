@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.7 (build-ready), amended 2026-10-19 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.8 (build-ready), amended 2026-10-19 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -10,7 +10,7 @@ Spec v0.7 (build-ready), amended 2026-10-19 with the owner decisions recorded in
 
 1. Read Part A, then Part B in full, before writing any code.
 2. Copy section A3 into `CLAUDE.md` at the repo root on the first commit.
-3. Build milestone by milestone (Part B, section 16). One milestone per session. Do not start M(N+1) until M(N) is tagged.
+3. Build milestone by milestone (Part B, section 16). One milestone per session, except that M2 to M10 run in three sessions: M2–M4, M5–M7 and M8–M10 (SPEC_GAPS G28). Do not start M(N+1) until M(N) is tagged.
 4. At the start of every session, re-read `CLAUDE.md`, `SPEC_GAPS.md` and the last milestone report in `docs/REPORTS.md`.
 5. The owner runs the commands himself. When you need him to run something, give each shell command in its own fenced block, one command per block, never chained.
 
@@ -117,7 +117,7 @@ Tauri 2 desktop app for Windows, macOS and Linux. Rust does all network, storage
 | Frontend | Svelte 5, TypeScript strict, Vite, plain CSS variables | No component library, no icon font, no remotely loaded fonts. Geist (SIL OFL) ships as local font files. |
 | Tests | `cargo test`, Vitest, Stalwart in Docker | Stalwart is the integration IMAP/SMTP server. |
 
-Target OS: Windows 10/11, current and previous two macOS releases, and Linux with WebKitGTK 4.1. Any dependency not in this table needs a spec change before code.
+Target OS: Windows 10/11, current and previous two macOS releases, and Linux with WebKitGTK 4.1. Until M11, builds and CI tests run on Windows only; the Stalwart integration job runs on Linux (SPEC_GAPS G24). Any dependency not in this table needs a spec change before code.
 
 **Dependency freshness.** M0 checks every crate in this table: last release within 12 months, no open security advisory, exact version pinned in `Cargo.lock`. A crate that fails goes into `SPEC_GAPS.md` with a proposed replacement, and the build stops there. `async-imap` is the one to watch; the `ImapTransport` trait exists so it can be swapped without touching `sync`.
 
@@ -156,7 +156,7 @@ Core (Rust) — higher rows call lower rows, never the reverse
 
 **One data path.** Server to `sync` to `store`, then a `store-changed(account, folder)` event, then the UI re-queries. The UI never reads data straight from a sync result. For user actions: UI command, `ops` writes the local change and a queue row, UI refreshes from the store (optimistic), `ops` pushes to the server, and on permanent failure reverts and emits an event.
 
-**Command and event contract.** This is the whole UI/Core surface. Adding a command is a spec change. Every command returns `Result<T, AppError>` where `AppError` is `{ code, message, account_id? }` and `code` is a fixed enum; the UI never sees a raw error string.
+**Command and event contract.** This is the whole UI/Core surface. Adding a command is a spec change. Every command returns `Result<T, AppError>` where `AppError` is `{ code, message, account_id? }` and `code` is a fixed enum; the UI never sees a raw error string. The codes are: `network`, `timeout`, `certificate`, `tls`, `auth_failed`, `oauth`, `throttled`, `server_rejected`, `recipient_rejected`, `too_large`, `unsupported`, `not_found`, `conflict`, `invalid_input`, `keychain`, `disk_full`, `db_corrupt`, `io`, `cancelled`, `internal` (meanings in SPEC_GAPS G18).
 
 | Command | Arguments | Returns |
 | --- | --- | --- |
@@ -256,7 +256,7 @@ An account is a server config plus a login method. Nothing else differs between 
 **Setup flow**
 
 1. The user enters an email address.
-2. Server settings resolve in this order: built-in table (Google, Fastmail, iCloud, Yahoo), the domain's own autoconfig URL, the Mozilla ISP database, an MX-host guess, then the manual form. Online lookups send only the domain, and a setting turns them off.
+2. Server settings resolve in this order: built-in table (Google, Fastmail, iCloud, Yahoo), the domain's own autoconfig URL, the Mozilla ISP database, then the manual form (SPEC_GAPS G27). Autoconfig XML is read by a small hand-written reader (G26). Online lookups send only the domain, and a setting turns them off.
 3. The app reads `CAPABILITY` and offers a login method: OAuth for Google hosts, password for everything else.
 4. Test connection: IMAP login plus `LIST`, SMTP `EHLO` plus `AUTH`. No message is sent. The account saves only if both pass, unless the user picks Save anyway.
 5. Folder roles come from SPECIAL-USE, then name heuristics. The user can override each.
@@ -760,6 +760,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.8 | 2026-10-19 | Owner decisions (SPEC_GAPS G18, G19, G24 to G28): AppError code list; `\Deleted` is flags bit 5; Windows-only builds until M11 with Stalwart on Linux; manual tests wait until M10 is done, except T31 and T32 at M8; hand-written autoconfig XML reader; MX-host guess dropped; M2 to M10 in three sessions. |
 | v0.7 | 2026-10-19 | Owner decisions (SPEC_GAPS G2 to G14): name Zero Mail; Geist bundled locally; opaque surfaces instead of window vibrancy; dark tokens derived from the zinc ramp; design extras outside the spec dropped and spec shortcuts kept; Undo toast 10 s; motion limited to fades and pop-ins; glue crates added to section 2; oauth2 freshness waiver; fake transport behind a cargo feature. |
 | v0.6 | 2026-10-18 | Build-ready. Section 18 schema and commands merged into sections 3 and 4. Scale resolved as assumption 13. App name is the one open question, with a placeholder identifier so M0 can start. BUILD.md exported with Part A for Claude Code. |
 | v0.5 | 2026-10-17 | Section 18, Gmail parity: feature map with verdicts; labels, snooze, schedule send, templates, mute, rules and block sender, unsubscribe, print, extended search operators, image preview; tests T36 to T44; M9 and M10 scope updated. |

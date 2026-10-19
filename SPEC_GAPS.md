@@ -129,8 +129,31 @@ Section 11 requires text contrast of at least 4.5:1. Three design pairs miss it:
 ## G17. Node version
 Spec A5 says Node 20+. The pinned Vite 8 plugin and Vitest 5 need Node 22.12 or newer. The build machine has 24.14, and CI uses Node 24. `package.json` `engines` says `>=22.12`.
 
-## G18. AppError codes — Open (blocks M2)
-Section 3 says `AppError.code` is "a fixed enum" but does not list its members. A proposed list goes to the owner at the start of M2, before the first command is added.
+## G18. AppError codes — Resolved 2026-10-19
+Section 3 said `AppError.code` is "a fixed enum" but did not list its members. The owner approved these 20 codes, taken from the failure cases in sections 5, 7, 9 and 12. Section 3 was amended to match.
+
+| Code | Meaning |
+| --- | --- |
+| `network` | Offline, unreachable, or the connection dropped |
+| `timeout` | Connect or command timeout (section 12) |
+| `certificate` | Invalid or changed certificate; pinning is offered |
+| `tls` | TLS handshake failed, or STARTTLS was not offered |
+| `auth_failed` | Wrong password or revoked OAuth; the account goes to `NeedsAttention` |
+| `oauth` | The OAuth flow failed or was cancelled |
+| `throttled` | Server throttling (`[LIMIT]`, `[UNAVAILABLE]`); 10 minute pause |
+| `server_rejected` | Permanent IMAP `NO`/`BAD` or SMTP 5xx |
+| `recipient_rejected` | SMTP 550 on `RCPT`; the message lists the addresses |
+| `too_large` | Over the SMTP `SIZE` or IMAP `APPENDLIMIT` limit |
+| `unsupported` | A capability or folder is missing (for example, no Archive) |
+| `not_found` | The account, folder, message or draft is gone |
+| `conflict` | Already exists, or a special-use folder delete |
+| `invalid_input` | Bad address, server config or value |
+| `keychain` | The OS keychain is unavailable or refused |
+| `disk_full` | The write stopped and was rolled back |
+| `db_corrupt` | The database was moved aside and is being rebuilt |
+| `io` | Local file error (save, attachment cache) |
+| `cancelled` | The user cancelled (dialog, undo window) |
+| `internal` | A bug; details only in the log |
 
 ## G19. `\Deleted` has no bit in `messages.flags` — Resolved 2026-10-19
 Invariant 8 says messages flagged `\Deleted` on the server are hidden in every view. Section 9 also leaves some messages "flagged and hidden" when the server has no UIDPLUS. But the section 4 `flags` column listed only bits 0–4, so the store had no way to know a row is `\Deleted`.
@@ -156,5 +179,26 @@ Section 4 says types are the builder's job but marks some columns `NULL`. M1 rea
 
 ## G23. `bcc:` search has no stored column — Open (blocks the `bcc:` operator in M9 only)
 Section 10 lists `bcc:` (Sent and Drafts only), but `messages` has no Bcc column. Bcc is never written to the header (section 7), so the Sent copy on the server has none. Bcc exists only in `drafts.content_json` and `outbox.envelope_json`. To be decided before M9.
+
+## G24. Windows-only builds until M11 — Resolved 2026-10-19
+The owner has only Windows desktops.
+- From M2, CI builds, tests and runs the startup harness on Windows only.
+- The Stalwart integration job stays on GitHub's Linux runner, which is the only place its container runs.
+- The format, audit and boundary checks stay on Linux. They are platform-neutral and do not build the app.
+- Whether macOS and Linux are still targets for M11 (packaging for three OSes, A6) is decided before M11.
+
+## G25. When tests run — Resolved 2026-10-19
+- Every milestone still writes its automated tests and ends with them green (CLAUDE.md, guardrail 7).
+- Manual tests (`docs/MANUAL_TESTS.md`) wait until M10 is done and M11 is starting.
+- The exception is M8: the owner runs T31 and T32 himself, because they are M8's only done-when tests.
+
+## G26. Autoconfig XML — Resolved 2026-10-19
+The domain's autoconfig file and the Mozilla ISP database are XML, and no XML crate is approved. The owner chose a small hand-written reader for just the autoconfig format. No new dependency.
+
+## G27. MX-host guess dropped — Resolved 2026-10-19
+An MX lookup needs a DNS crate, and none is approved. DNS-over-HTTPS would contact a third party, which section 13 forbids. The owner dropped the step. Resolution is now: built-in table, the domain's autoconfig URL, the Mozilla ISP database, then the manual form. Section 5 was amended.
+
+## G28. Milestones per session — Resolved 2026-10-19
+The owner amended A1: M2 to M10 run in three sessions, M2–M4, M5–M7 and M8–M10. Each milestone inside a session still ends with tests green, a `docs/REPORTS.md` entry and its own `m<N>` tag before the next one starts. A session stops at any open spec gap.
 
 G1 update (2026-10-19): the owner installed Rust (1.99.1, MSVC host) and the VS 2022 Build Tools. Docker is not installed locally, by the owner's choice; the Stalwart tests run in CI (GitHub's Linux runners), and the fake transport covers local runs.
