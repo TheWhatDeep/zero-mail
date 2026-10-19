@@ -12,7 +12,7 @@
 //   cargo run -p mail-store --example xss_fixture -- tests/fixtures/generated/xss tests/fixtures/xss/corpus.html
 //   node tests/render/xss-harness.mjs --data tests/fixtures/generated/xss [--binary path]
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,16 +88,41 @@ async function enable(sessionId) {
   await send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sessionId);
 }
 
+/** The DevTools port: the one asked for, or the one WebView2 wrote to its profile. */
+function activePort() {
+  const file = join(dir, "webview2", "EBWebView", "DevToolsActivePort");
+  try {
+    return Number(readFileSync(file, "utf8").split(/\r?\n/)[0]) || null;
+  } catch {
+    return null;
+  }
+}
+
 async function connect() {
   for (let i = 0; i < 300; i++) {
-    try {
-      const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
-      return version.webSocketDebuggerUrl;
-    } catch {
-      await sleep(200);
+    for (const p of new Set([port, activePort()].filter(Boolean))) {
+      try {
+        const version = await (await fetch(`http://127.0.0.1:${p}/json/version`)).json();
+        return version.webSocketDebuggerUrl;
+      } catch {
+        // Not listening yet.
+      }
     }
+    await sleep(200);
   }
-  throw new Error("the DevTools port never opened");
+  // Why: is the app alive, and did WebView2 start with our profile and arguments?
+  const list = (p) => {
+    try {
+      return readdirSync(p).slice(0, 20).join(",");
+    } catch {
+      return "missing";
+    }
+  };
+  throw new Error(
+    `the DevTools port never opened; app exit code ${child.exitCode}; ` +
+      `profile [${list(join(dir, "webview2"))}]; EBWebView [${list(join(dir, "webview2", "EBWebView"))}]; ` +
+      `active port ${activePort()}`,
+  );
 }
 
 let page;
