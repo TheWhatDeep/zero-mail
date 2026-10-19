@@ -286,3 +286,68 @@ Section 6, step 8 prefetches "text and HTML parts (each up to 1 MB)". Section 12
 - **Account removed:** an actor whose account row is gone stops.
 - **Missing credentials:** an account with no keychain password goes to `NeedsAttention`.
 - **Charsets:** `mail-parser`'s `full_encoding` feature is on, so Shift_JIS, ISO-2022-JP and GB2312 decode (section 2: "charset conversion included"; T22). It brings `encoding_rs` in as a transitive dependency. Nothing was added to the approved list.
+
+## G41. What "real mail" means for M4's done-when — Resolved 2026-10-20
+M4's done-when is "Real mail visible in the UI at 60 fps scroll". Automated tests may not use a real mailbox, and Stalwart runs only on Linux CI (G24). The owner chose:
+- **Automated:** the perf harness scrolls a 50,000-message store fixture in the Windows release build. It checks 60 fps and at most 100 DOM rows.
+- **By hand, once at M4:** the owner adds his Workspace account with an app password and looks at his own mail. This is a check, not a section 15 test, so G25 does not delay it.
+
+## G42. How plain text reaches the M4 reader — Resolved 2026-10-20
+Core serves the plain text from `mail-body://` from M4 on:
+- The text is HTML-escaped, with nothing else added.
+- The response carries the section 8 CSP header with a per-response nonce.
+- The text is shown in the sandboxed iframe without `allow-same-origin`.
+
+M5 adds the HTML pipeline (ammonia, URL rewriting, linkify) to the same protocol. The command contract is unchanged.
+
+## G43. A minimal add-account form in M4 — Resolved 2026-10-20
+The form asks for the email, runs resolve, shows the server fields to edit, and takes the password. It has Test, Save, and Save anyway after a failed test. It also offers to pin a certificate it shows. It uses the `account.*` commands. M10 turns it into onboarding.
+
+## G44. Which startup the budget measures — Resolved 2026-10-20
+The 1.5 s startup budget is measured with the app cold and the OS warm:
+- The app is not running, but the OS and WebView2 files are cached.
+- The result is the median of 5 launches, after one discarded warm-up launch.
+- The end point is an interactive cached inbox: list rows are rendered.
+
+CI enforces the budget from M4.
+
+## G45. UI items of later milestones are hidden until built — Resolved 2026-10-20
+Until their milestones:
+- All Inboxes (M9), Snoozed (M9), Outbox (M7) and Group by conversation (M9) are not shown.
+- The reading-pane position setting (M10) is not shown, and the pane sits on the right.
+- Search (M9), Compose and reply (M7), and message actions (M6) are not shown.
+- The list shows one row per message.
+
+## G46. No command listed the accounts — Resolved 2026-10-20: `account.list` added
+At startup the UI needs every account and its current state. The owner added `account.list`. It takes no arguments and returns every account summary with its current state and last error. After that, `account-state` events keep the UI current. Section 3 was amended.
+
+## G47. Phosphor icon source — Resolved 2026-10-20
+The owner approved downloading the regular-weight SVGs (and `star-fill`) of `@phosphor-icons/core` 2.1.1 (MIT) from unpkg.com. Only their path data and the MIT notice are copied into `ui/src/lib/icons.ts` (G10). Nothing is a dependency.
+
+## G48. When the database integrity check runs — Resolved 2026-10-20
+Section 12 moves a database that fails its integrity check aside as `*.corrupt` and rebuilds it. The owner chose:
+- **At open:** if SQLite reports that the file is not a database or is corrupt, the file is moved aside and a fresh database is created at once.
+- **After startup:** a `PRAGMA quick_check` runs in the background, after the inbox is showing. If it fails, `storage-warning` (`db_corrupt`) fires, and the move-aside and rebuild happen at the next start.
+- **Either way:** the user is warned that outbox items in the old file may be lost.
+
+## G49. M4 wiring details — Resolved by interpretation (owner to ratify)
+- **Capability file:** section 13.3 says the capability file lists only the app's own commands. It lists exactly the eleven M4 commands, plus `core:event:allow-listen` and `core:event:allow-unlisten`, without which the UI cannot receive the section 3 events. Nothing else is allowed.
+- **Perf mode:** in the harness only (`ZEROMAIL_PERF_OUT` set), the app adds one runtime capability, `core:event:allow-emit`, so the page can report its startup and scroll marks. The shipped capability file never allows it, so the page's reports outside perf mode fail silently.
+- **Data directory override:** the harness and tests set `ZEROMAIL_DATA_DIR`. Without it the app uses the OS app-data directory.
+- **Command names:** Tauri commands are Rust identifiers, so `account.list` is invoked as `account_list`. `ui/src/lib/ipc.ts` keeps the section 3 names.
+- **Folder open:** `list.page` without a cursor tells the account's actor which folder is open. It then syncs at once and every 5 minutes (section 6, step 9). No new command.
+- **Message open:** `message.open` on an uncached body queues the fetch ahead of all other work and returns `body_kind: loading`. `store-changed` follows when the body is stored. A text part over 1 MB is cut there (`body_state` `text`, G35).
+- **IDLE catch-up:** each IDLE connection queues one sync of its folder right after its SELECT. A change landing between the worker's sync and that SELECT would otherwise not be seen until the next change.
+
+## G50. Visual values added in M4 — Resolved by interpretation (owner to ratify, with the G5 review)
+Every value lives in `tokens.css`. New colors reuse existing palette values through alias tokens:
+- **Account status dots:** up to date uses `--color-accent`. Connecting or syncing uses `--color-accent-400`. Waiting to retry uses `--color-text-muted`. Needs attention uses `--color-accent-2`. Off is a hollow ring in `--color-border-control`.
+- **Skeleton rows:** `--color-divider-row`.
+- **Banners:** use the card style with a muted or magenta icon. There is no new fill color.
+- **Layout values the design implied:**
+  - Row height 50 px (40 px compact), list header 41 px, status bar 28 px.
+  - Sender and date columns 120 and 64 px, badge minimum width 24 px.
+  - Form width 560 px, port and security fields 88 and 120 px.
+  - Disabled opacity 0.5.
+- **Monospace font:** certificate fingerprints use the system monospace stack (`--font-mono`), with nothing bundled.
+- **Folder-reset toast:** shows for 10 s, the spec's only toast duration (section 9).
