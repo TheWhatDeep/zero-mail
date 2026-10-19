@@ -89,7 +89,7 @@ M1 (`store`). M2 is blocked on G18 (the AppError code list).
 
 ## M1: done, tagged `m1` (2026-10-19)
 
-Scope: `store` (`crates/mail-store`): schema, migrations, query API, FTS, writer and read pool. Both done-when tests pass: the migration test and keyset pagination on a 50,000-row fixture. Every check below passes locally on Windows 10 (Rust 1.99.1). CI result is added once the run is green.
+Scope: `store` (`crates/mail-store`): schema, migrations, query API, FTS, writer and read pool. Both done-when tests pass: the migration test and keyset pagination on a 50,000-row fixture. Every check below passes locally on Windows 10 (Rust 1.99.1) and in CI on Windows, macOS and Linux ([run 39228812671](https://github.com/TheWhatDeep/zero-mail/actions/runs/39228812671)): boundaries and freshness, fmt, `cargo audit` (covering the new `rusqlite` and `libsqlite3-sys`), `npm audit`, lint, clippy, tests on three OSes, Stalwart integration, and the startup harness.
 
 ### Built
 - **Schema (migration v1):**
