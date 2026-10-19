@@ -184,3 +184,105 @@ None from spec v0.7. The section 4 amendment for G19 (bit 5 = `\Deleted`) is the
 
 ### Next
 M2. It is still blocked on G18 (the AppError code list).
+
+## M2: done, tagged `m2` (2026-10-19)
+
+Scope: `imap`, `secrets`, `auth` (password), account CRUD, autoconfig, and the SMTP connection test (G32). Done when: an account is added against the Stalwart container, `LIST` works, and T09 passes at the login level (G33). Every check below passes locally on Windows 10 (Rust 1.99.1). CI is green on Windows, with Stalwart on Linux ([run 39259264139](https://github.com/TheWhatDeep/zero-mail/actions/runs/39259264139)). The Stalwart-backed tests ran only in CI, because Docker is not installed locally.
+
+### Built
+- **`mail-imap`, the real transport (`ImapClient` / `ImapSession`):**
+  - **Connection:** TCP with a 60 s keepalive (G31). TLS 1.2+ through rustls on `ring`, verified by the OS trust store (G30). With a per-account pin, only an exact SHA-256 match of the leaf certificate is accepted. A certificate failure reports the presented fingerprint.
+  - **STARTTLS:** required on 143. It aborts before anything else is sent when STARTTLS is not offered. Capabilities seen before TLS are discarded.
+  - **Login:** `AUTHENTICATE PLAIN`, falling back to `LOGIN` unless `LOGINDISABLED`. XOAUTH2 is wired for M8. Exactly one attempt: a rejected login is never retried.
+  - **Commands:** every `ImapTransport` method, each under the section 12 timeouts. A timeout or a broken stream poisons the connection.
+    - `LIST` adds `RETURN (SPECIAL-USE STATUS ...)` where advertised.
+    - `SELECT` adds `(CONDSTORE)` where advertised. `ENABLE QRESYNC` runs after login when advertised.
+    - Header fetch covers `UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE`, the selected headers, `MODSEQ`, and the `X-GM-*` attributes.
+    - Flag fetch uses `CHANGEDSINCE` and `VANISHED`.
+    - The rest: part fetch, `STORE`, `MOVE`/`COPY` with `COPYUID`, `UID EXPUNGE`, `APPEND` (literal) with `APPENDUID`, `CREATE`/`RENAME`/`DELETE`, raw `IDLE` with re-issue and read deadlines, `NOOP`, `LOGOUT`.
+  - **Search strings:** non-ASCII strings are sent as literals with `CHARSET UTF-8`.
+  - **Error mapping:** throttle responses (`[LIMIT]`, `[UNAVAILABLE]`, bandwidth messages) become `Throttled`, including on BYE. `[NONEXISTENT]` and `[TRYCREATE]` become `NoSuchMailbox`.
+  - **Folder names:** modified UTF-7 in both directions.
+  - **Folder roles:** SPECIAL-USE first, then name heuristics, at most one folder per role (section 5, step 5).
+  - **Probe:** `ImapConnector::probe` reads the pre-login capabilities so setup can offer a login method. The fake implements it too.
+- **`mail-secrets`:**
+  - `SecretStore` trait. `Keychain` (the `keyring` crate, service `com.digitalcircuitry.zeromail`) uses keys `account:<id>:password` and `account:<id>:refresh_token`.
+  - `Secret` never prints.
+  - `MemoryStore` behind the `fake` feature, for tests and for the Linux CI runner, which has no Secret Service.
+- **`mail-smtp`:** `SmtpCheck::check_login` (G32) runs connect, `EHLO`, `AUTH PLAIN`/`LOGIN` and `QUIT`, and sends no message.
+  - TLS is ours: the same verifier and pin as IMAP, kept as a copy because the crates may not depend on each other. lettre speaks SMTP over the encrypted stream.
+  - STARTTLS is required on 587. The plaintext part is only greeting, `EHLO` and `STARTTLS`, and data arriving before the handshake is refused.
+  - The EHLO name is `[127.0.0.1]`, so the host name never leaves the machine.
+  - `FakeSmtp` behind the `fake` feature.
+- **`mail-auth`:**
+  - **Resolution order:** the built-in table (Google, Fastmail, iCloud, Yahoo), then `https://autoconfig.<domain>/mail/config-v1.1.xml`, then `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`, then the Mozilla ISP database. An empty result means the manual form.
+  - **Lookups:** HTTPS only, domain only, and switched off by the `privacy.online_lookups` setting.
+  - **XML:** a hand-written reader (G26). It refuses DOCTYPE internal subsets and unknown entities and caps depth, and the document size is capped at 256 KB. Plaintext and CRAM-only servers are dropped.
+  - **HTTP client:** `reqwest` with `rustls-no-provider` on `ring` (G29), with no cookies, no referrer, no proxy, a generic user agent and a 10 s timeout. `aws-lc-rs` is no longer in the build.
+  - **Login methods:** `auth_methods` offers OAuth and an app password for Google hosts, and a password everywhere else.
+  - **Passwords:** `password_login` and `store_password` read and write the keychain.
+- **`mail-store`:** `add_account`, which writes the account and its default identity in one transaction (section 5: every account has at least one identity). Also `get_account`, `list_accounts`, `update_account`, `set_account_enabled`, `list_identities`, `get_setting` and `set_setting`.
+- **`mail-core`:**
+  - `AppError { code, message, account_id? }` with the 20 G18 codes, serialized as the snake-case strings G18 lists, plus mappings from every module error.
+  - `Accounts` implements `resolve`, `test`, `add`, `update`, `remove`, `set_enabled`, `list` and `check_login`. Saving requires both halves of Test connection to pass, unless Save anyway is set.
+  - The password goes only to the keychain. A keychain failure undoes the account insert.
+  - Remove deletes the account's rows and keychain entries and touches nothing on the server.
+- **CI:** the Linux integration job now builds and runs `cargo test -p mail-core --test stalwart -- --ignored`. These tests are `#[ignore]`d everywhere else.
+- **Dependencies:** `rustls-platform-verifier` and `socket2` were added to `[workspace.dependencies]` (G30, G31). `reqwest` switched to `rustls-no-provider` (G29). `check-deps --online` passes.
+
+### Tests added (55 local, plus 3 in CI; workspace total 104 local)
+- `mail-imap` (+20):
+  - Fingerprint parsing, and an unreachable port reporting `Network`.
+  - Modified UTF-7: the RFC 3501 examples, round trips, malformed input.
+  - INTERNALDATE parsing, throttle text, UIDPLUS uid-sets.
+  - BODYSTRUCTURE: single part and nested multipart with part ids, content id, disposition and filename.
+  - Folder-role heuristics.
+  - Command building: UTF-7 quoting, search literals, the APPEND literal. SASL PLAIN and XOAUTH2 responses. Status and error mapping.
+  - Against a scripted plaintext server: STARTTLS not offered aborts with nothing sent; capabilities are asked for when the greeting lacks them; a plaintext server on an implicit-TLS port fails TLS.
+- `mail-secrets` (4): key format, redaction, the memory store, and a real Windows Credential Manager round trip.
+- `mail-smtp` (4): missing STARTTLS aborts before any AUTH, refused STARTTLS aborts, a plaintext server on 465 fails TLS, and a refused port is transient.
+- `mail-auth` (12):
+  - The Google host rule.
+  - Address validation.
+  - The keychain password round trip.
+  - The built-in table.
+  - The XML reader: entities, CDATA and comments are handled; malformed or hostile input is rejected.
+  - Resolution: order and URLs, with only the domain sent; offline mode sends nothing; usable servers only; garbage and oversize documents.
+  - The HTTP client builds and refuses `http://`.
+- `mail-store` (3): account plus identity in one transaction, update, enable, list and NotFound, the identity cascade, and settings as JSON.
+- `mail-core` (12):
+  - The AppError contract: shape, all 20 codes, the certificate fingerprint.
+  - Add, list and `check_login`, with no password in anything the UI receives.
+  - A failing IMAP or SMTP half blocks saving, and Save anyway skips the test.
+  - Update replaces settings and password, or keeps the saved password.
+  - Remove deletes rows and keychain entries with zero server calls.
+  - Invalid input is rejected before any connection; OAuth returns `unsupported` until M8.
+  - Pin normalization.
+  - Resolve: login methods from the host and capabilities, a certificate to pin, and the offline setting.
+  - **T09 (login level):** after revocation, `auth_failed` with the account id, exactly one `Connect` and no `LIST`, and the other account still logs in.
+- **Stalwart, CI only (3):**
+  - Unpinned Test connection reports the self-signed certificate on both halves with one fingerprint. Pinned, it passes over implicit TLS and STARTTLS for IMAP and SMTP.
+  - Add the account; `check_login` returns at least INBOX; a different pin is a hard failure.
+  - The real transport probes, lists with roles, selects INBOX, NOOPs and logs out.
+  - T09: a stale password gives `auth_failed` on both halves and on `check_login`, while another account keeps working.
+- **Checks run here:**
+  - `npm --prefix ui run build`.
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --workspace --all-targets -- -D warnings`.
+  - `cargo test --workspace`: 104 passed, 3 ignored.
+  - `npm test`: 18 passed. `npm run lint`: 0 errors, 0 warnings.
+  - `node scripts/check-deps.mjs --online`: every crate fresh except the waived `oauth2`.
+
+### Deviations
+None from spec v0.9. v0.9 records the owner's decisions G29–G33.
+
+### Gaps found
+- **G29–G33:** resolved by the owner (see above).
+- **G34** (interpretation, owner to ratify): one pin covers IMAP and SMTP. For `certificate` errors, `message` is the fingerprint.
+- **Consequence of G27, for the owner to know:** a Google Workspace address on a custom domain resolves through the domain's autoconfig file, if it has one, else the manual form. The built-in table matches only gmail.com and googlemail.com, and the MX guess that would have found Google is dropped.
+- **Not in M2's scope:**
+  - The Tauri command layer (`account.*` handlers, `ipc.ts`, opening the store at startup) is wired with the first UI that calls it, in M4.
+  - Folder rows are written by `sync` in M3. `account.remove` has no cached files to delete yet; the attachment cache arrives in M5.
+
+### Next
+M3 (`sync`).
