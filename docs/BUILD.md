@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.11 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.12 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -660,8 +660,8 @@ Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mai
 | M2 | `imap`, `secrets`, `auth` (password), account CRUD, autoconfig, SMTP connection test (G32) | Add an account against the container; `LIST` works; T09 at the login level (G33) |
 | M3 | `sync`: actors, folder order, folder procedure, IDLE, backoff | T01, T02, T04 (row part, G38), T05 (list part), T07, T08, T09 with actors (G33) |
 | M4 | UI shell, virtualized list, plain-text reader (via `mail-body`, G42), sidebar, status bar, minimal add-account form (G43) | 60 fps scroll on the 50,000-message fixture and the owner's own mail seen once (G41); T04 reading-pane part (G38); startup budget enforced (G44) |
-| M5 | `render`: parser, sanitizer, protocols, attachments | T19 to T24 |
-| M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks | T03, T06, T25 to T28 |
+| M5 | `render`: parser, sanitizer, protocols, attachments; logging and `log.open` (SPEC_GAPS G51) | T19 to T24 |
+| M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks; `folder.extend_window` (G51) | T03, T06, T25 to T28 |
 | M7 | `smtp`, `outbox`, compose window, drafts, identities, contacts | T10 to T18 |
 | M8 | OAuth: Google XOAUTH2 end to end | T31, T32 |
 | M9 | Threading, search, unified inbox, labels, snooze, send later, mute, templates, rules | T29, T30, T36 to T42 |
@@ -762,6 +762,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.12 | 2026-10-20 | Owner ratified G20 to G22, G34, G39, G40, G49 and G50. Logging and `log.open` scheduled in M5, `folder.extend_window` in M6 (SPEC_GAPS G51). |
 | v0.11 | 2026-10-20 | Owner decisions (SPEC_GAPS G41 to G48): M4 done-when (fixture at 60 fps and the owner's own mail once); plain text through `mail-body` from M4; minimal add-account form in M4; startup budget is app cold, OS warm; later-milestone UI hidden until built; `account.list` added; Phosphor icon source; background integrity check. |
 | v0.10 | 2026-10-20 | Owner decisions (SPEC_GAPS G35 to G38): `body_state` meanings; one thread per message until M9 (Gmail by X-GM-THRID); event `folder-reset` for the UIDVALIDITY toast; T04 split between M3 (row) and M4 (reading pane). |
 | v0.9 | 2026-10-19 | Owner decisions (SPEC_GAPS G29 to G33): autoconfig in `auth` over `reqwest` (HTTPS, domain only, `ring` provider); `rustls-platform-verifier` for trusted roots; `socket2` for the 60 s keepalive; M2 includes the SMTP half of Test connection; T09 split between M2 (login level) and M3 (actors). |

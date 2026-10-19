@@ -160,24 +160,24 @@ Invariant 8 says messages flagged `\Deleted` on the server are hidden in every v
 - The owner chose **bit 5 = `\Deleted` on the server**. Every list and search query filters `flags & 32 = 0`. No new column.
 - Section 4 was amended to match.
 
-## G20. FTS external-content source — Resolved by interpretation (owner to ratify)
+## G20. FTS external-content source — Resolved by interpretation, ratified by the owner 2026-10-20
 Section 10 indexes subject, from, to/cc and body text. Body text is in `bodies` and the headers are in `messages`. An FTS5 external-content table reads from one source, so:
 - `message_fts` (columns `subject`, `sender`, `recipients`, `body`) uses the view `message_fts_content` (`messages LEFT JOIN bodies`) as its content. A view is not a table or a column. It is the only way to give FTS5 one source that spans the two tables.
 - Triggers on `messages` and `bodies` keep the index in step, including cascaded deletes and upserts.
 - `to_json`, `cc_json` and `reply_to_json` hold JSON arrays of `[name, addr]` pairs, with no keys. Only names and addresses reach the index, and FTS5's content consistency check works. That check fails when the view uses `json_each` or `json_tree`.
 
-## G21. Nullability and "not set yet" values — Resolved by interpretation (owner to ratify)
+## G21. Nullability and "not set yet" values — Resolved by interpretation, ratified by the owner 2026-10-20
 Section 4 says types are the builder's job but marks some columns `NULL`. M1 reads that literally:
 - Every column the spec marks `NULL` is nullable, and every other column is `NOT NULL`.
 - "Not set yet" is written as `''` or `0`. Examples: `uidvalidity` and `synced_at` stay 0 until a folder is first selected (0 is not a valid UIDVALIDITY); `oauth_client_id` is `''` for password accounts; `text_html` is `''` for plain-only mail; `last_error` is `''` when there is no error.
 - The migration test checks this nullability against the spec column by column.
 
-## G22. Two folder references without a foreign key — Resolved by interpretation (owner to ratify)
+## G22. Two folder references without a foreign key — Resolved by interpretation, ratified by the owner 2026-10-20
 - `pending_ops.folder_id` has no foreign key. A queued folder delete (M6) must outlive the local folder row it deletes optimistically, and a cascade would drop the op before it reached the server. The UIDVALIDITY purge drops the folder's ops explicitly (section 12).
 - `snoozes.origin_folder_id` has no foreign key either, so that deleting the origin folder neither deletes the snooze nor is blocked by it. Where the message goes back to in that case is M9's question.
 - Every other reference has a foreign key: `ON DELETE CASCADE` to its owner, or `NO ACTION` for `messages.thread_id` and `outbox.identity_id`.
 
-## G23. `bcc:` search has no stored column — Open (blocks the `bcc:` operator in M9 only)
+## G23. `bcc:` search has no stored column — Open (blocks the `bcc:` operator in M9 only; the owner agreed 2026-10-20 to decide it before M9)
 Section 10 lists `bcc:` (Sent and Drafts only), but `messages` has no Bcc column. Bcc is never written to the header (section 7), so the Sent copy on the server has none. Bcc exists only in `drafts.content_json` and `outbox.envelope_json`. To be decided before M9.
 
 ## G24. Windows-only builds until M11 — Resolved 2026-10-19
@@ -247,7 +247,7 @@ Proposal:
   - In both, exactly one login attempt is made, no retry follows, the error class is `NeedsAttention`, and a second account on the same server still logs in and lists.
 - **M3:** T09 runs again with actors: the account state becomes `NeedsAttention`, no reconnect timer starts, and the other account's actor keeps syncing.
 
-## G34. One certificate pin per account, and how the fingerprint reaches the UI — Resolved by interpretation (owner to ratify)
+## G34. One certificate pin per account, and how the fingerprint reaches the UI — Resolved by interpretation, ratified by the owner 2026-10-20
 Section 4 has one `accounts.pinned_cert_sha256` column, and section 5 says the user pins "the server certificate" per account. M2 reads this as follows:
 - The one pin applies to both the IMAP and the SMTP connection. The Stalwart test container uses one certificate for both, and so do most self-hosted servers.
 - Limit: a self-hosted pair whose IMAP and SMTP servers present two different self-signed certificates cannot be pinned. A second column would be a schema change.
@@ -272,7 +272,7 @@ Section 12 says a UIDVALIDITY change shows a toast, but no section 3 event carri
 - **M3:** the expunged row disappears locally.
 - **M4:** the open reading pane keeps the body and shows This message was deleted. The plain-text reader arrives in M4.
 
-## G39. Which messages the prefetcher skips — Resolved by interpretation (owner to ratify)
+## G39. Which messages the prefetcher skips — Resolved by interpretation, ratified by the owner 2026-10-20
 Section 6, step 8 prefetches "text and HTML parts (each up to 1 MB)". Section 12 says a very large message gets "no body prefetch" but gives no size. M3 reads the two together:
 - The prefetcher takes the folder's newest 200 messages. The cap counts messages that already have a body.
 - It fetches each message's body text/plain and text/html parts whole.
@@ -280,7 +280,7 @@ Section 6, step 8 prefetches "text and HTML parts (each up to 1 MB)". Section 12
 - The message's total size does not matter. A small text part with a 20 MB attachment is prefetched; the attachment is never fetched (invariant 3).
 - HTML-only mail gets generated plain text, through `mail-parser`'s HTML-to-text, which is stored as `text_plain`. Previews and search then work (section 8).
 
-## G40. Small sync event and state details — Resolved by interpretation (owner to ratify)
+## G40. Small sync event and state details — Resolved by interpretation, ratified by the owner 2026-10-20
 - **Throttle pause:** the 10-minute throttle pause shows as state `Backoff`, with `last_error` `throttled`. Section 6 has no separate paused state.
 - **Folder list changes:** `store-changed` with no `folder_id` (null) means the account's folder list changed. A folder was added or purged by `LIST`.
 - **Account removed:** an actor whose account row is gone stops.
@@ -330,7 +330,7 @@ Section 12 moves a database that fails its integrity check aside as `*.corrupt` 
 - **After startup:** a `PRAGMA quick_check` runs in the background, after the inbox is showing. If it fails, `storage-warning` (`db_corrupt`) fires, and the move-aside and rebuild happen at the next start.
 - **Either way:** the user is warned that outbox items in the old file may be lost.
 
-## G49. M4 wiring details — Resolved by interpretation (owner to ratify)
+## G49. M4 wiring details — Resolved by interpretation, ratified by the owner 2026-10-20
 - **Capability file:** section 13.3 says the capability file lists only the app's own commands. It lists exactly the eleven M4 commands, plus `core:event:allow-listen` and `core:event:allow-unlisten`, without which the UI cannot receive the section 3 events. Nothing else is allowed.
 - **Perf mode:** in the harness only (`ZEROMAIL_PERF_OUT` set), the app adds one runtime capability, `core:event:allow-emit`, so the page can report its startup and scroll marks. The shipped capability file never allows it, so the page's reports outside perf mode fail silently.
 - **Data directory override:** the harness and tests set `ZEROMAIL_DATA_DIR`. Without it the app uses the OS app-data directory.
@@ -339,7 +339,7 @@ Section 12 moves a database that fails its integrity check aside as `*.corrupt` 
 - **Message open:** `message.open` on an uncached body queues the fetch ahead of all other work and returns `body_kind: loading`. `store-changed` follows when the body is stored. A text part over 1 MB is cut there (`body_state` `text`, G35).
 - **IDLE catch-up:** each IDLE connection queues one sync of its folder right after its SELECT. A change landing between the worker's sync and that SELECT would otherwise not be seen until the next change.
 
-## G50. Visual values added in M4 — Resolved by interpretation (owner to ratify, with the G5 review)
+## G50. Visual values added in M4 — Resolved by interpretation, ratified by the owner 2026-10-20
 Every value lives in `tokens.css`. New colors reuse existing palette values through alias tokens:
 - **Account status dots:** up to date uses `--color-accent`. Connecting or syncing uses `--color-accent-400`. Waiting to retry uses `--color-text-muted`. Needs attention uses `--color-accent-2`. Off is a hollow ring in `--color-border-control`.
 - **Skeleton rows:** `--color-divider-row`.
@@ -351,3 +351,7 @@ Every value lives in `tokens.css`. New colors reuse existing palette values thro
   - Disabled opacity 0.5.
 - **Monospace font:** certificate fingerprints use the system monospace stack (`--font-mono`), with nothing bundled.
 - **Folder-reset toast:** shows for 10 s, the spec's only toast duration (section 9).
+
+## G51. Two features no milestone named — Resolved 2026-10-20: the owner delegated the choice
+- **Load older:** `folder.extend_window` adds 90 days per click (sections 3 and 12). It goes in **M6**, next to the other folder commands and the folder `ops`. Sync already keeps older cached rows, so the command only has to fetch the extra window and add a Load older control at the end of the list.
+- **Logging:** section 13.8 asks for rotating log files (5 files of 2 MB, level info), with no message content or credentials at any level. It also asks for a debug switch with IMAP and SMTP traces that redact `AUTH`, `LOGIN` and message literals. `log.open` opens the folder. This goes in **M5**, early, so later milestones have logs to debug with. `tracing-appender` rotates by time, not size, so M5 adds a small size-rotating writer of our own on `tracing-subscriber`. No new crate. The UI switch for the debug setting arrives with Settings in M10.
