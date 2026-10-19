@@ -286,3 +286,108 @@ None from spec v0.9. v0.9 records the owner's decisions G29–G33.
 
 ### Next
 M3 (`sync`).
+
+## M3: done, tagged `m3` (2026-10-20)
+
+Scope: `sync`: actors, folder order, folder procedure, IDLE, backoff. Done when: T01, T02, T04 (row part, G38), T05 (list part), T07 and T08 pass, plus T09 with actors (G33). Every check below passes locally on Windows 10. CI is green on Windows and in the Stalwart job ([run 39312899452](https://github.com/TheWhatDeep/zero-mail/actions/runs/39312899452)).
+
+### Built
+- **`mail-sync`, the account actor (`spawn_account`, `AccountHandle`):**
+  - **One actor per account** with the section 6 states: Disabled, Connecting, Syncing, Idle, Backoff and NeedsAttention.
+  - **Connections:** one worker connection runs a priority queue: user requests, then pending ops (M6), then folder sync, then prefetch, deduplicated. INBOX gets an IDLE connection, and so does each watched folder, up to 3, for at most 5 connections. The IDLE connections open once INBOX headers are in.
+  - **IDLE:** re-issued every 25 minutes, and any news queues that folder's sync. Without IDLE, INBOX is polled every 2 minutes.
+  - **Folders on request:** `refresh` (priority 1). A folder open in the UI syncs at once and every 5 minutes.
+  - **Retries:**
+    - Backoff starts at 2 s and doubles to 5 minutes with ±20% jitter. It resets once a connection has stayed healthy for 60 s.
+    - A throttle response pauses the account for a fixed 10 minutes (shown as Backoff, G40).
+    - After BYE or a closed socket, the actor reconnects once at once, then backs off.
+    - A bad login, a bad certificate or missing credentials go to NeedsAttention with no timer. Only `retry` or an account change brings the account back.
+    - Disabling the account closes every connection. An actor whose account was removed stops.
+  - **Events:** `SyncEvent` carries `StoreChanged` (no folder means the folder list changed), `AccountState` (with the error and the wait), `SyncProgress` and `FolderReset` (G37). Core debounces and forwards them in M4.
+- **Folder list:**
+  - `LIST`, then roles: SPECIAL-USE first, then name heuristics.
+  - New paths are added. Vanished paths are purged with their messages (section 12).
+  - Known folders keep their switches.
+  - On `X-GM-EXT-1`, All Mail starts with sync off.
+- **Folder order:** INBOX, then Drafts, Sent and Archive, then the rest alphabetically. INBOX is complete before any other folder is selected.
+- **Folder procedure, steps 1–7:**
+  - **UIDVALIDITY:** the first value is recorded before anything is cached. A change purges the folder, fires `folder-reset`, and starts a first sync.
+  - **New mail:** the first sync takes `UID SEARCH SINCE` for the last `sync_days`, minus what is cached. That rule also resumes a killed first sync. Later syncs take `UID SEARCH UID n:*`, filtered for the RFC quirk. Headers come newest first, 100 per batch, one transaction per batch, with `store-changed` and `sync-progress` after each.
+  - **Flags and deletions:**
+    - With CONDSTORE, a single `UID FETCH 1:max (FLAGS) (CHANGEDSINCE m VANISHED)` covers the folder, and with QRESYNC its VANISHED list replaces `SEARCH ALL`.
+    - Without CONDSTORE, flags are fetched in batches of 500 and deletions come from `UID SEARCH ALL`.
+  - **Step 7:** counters and server state, then `store-changed`.
+  - **Step 3** (push pending ops) has nothing to do until `ops` arrives in M6.
+- **Headers to rows:**
+  - `mail-parser` decodes RFC 2047 subjects and names, address lists and groups, Date, Message-ID, In-Reply-To and References. IDs are stored bare.
+  - A missing Message-ID gets a synthetic `synth:<account>:<folder>:<uid>@local`. A bad Date, a missing one, or one more than 24 h ahead falls back to INTERNALDATE.
+  - Flags map to bits, including `$Forwarded`.
+  - Attachment metadata comes from BODYSTRUCTURE. Inline parts are marked and do not set `has_attach`.
+  - Threads: one per message, or shared by `X-GM-THRID` (G36).
+- **Body prefetch (step 8):**
+  - Takes the newest 200 messages per folder, at the lowest priority, one message per job.
+  - Fetches the text/plain and text/html parts whole. A body text part over 1 MB is skipped (G39).
+  - Transfer and charset decoding follow section 8's fallback: UTF-8, then Windows-1252, then lossy. HTML-only mail gets generated plain text.
+  - Previews take the first 140 characters, with quotes and the signature dropped.
+  - `body_state` becomes `full` (G35).
+- **`mail-store`:** queries for the folder list, the first UIDVALIDITY, cached UIDs, threaded inserts, flags, finishing a folder sync, prefetch candidates and bodies with previews. Migration V2 adds an index on `(account_id, gm_thrid)`. `integrity_check` runs on the writer (see Gaps).
+- **`mail-imap`:**
+  - `uid_fetch_changes` sends `CHANGEDSINCE` over `1:max`.
+  - `SearchKey::UidFrom` sends `UID n:*`. The fake mimics the RFC quirk.
+  - The fake gained `fail_after(op, n, error)`.
+- **`mail-auth`:** `LoginSource` and `KeychainLogins`, so sync gets credentials through `auth` (section 3).
+- **Dependencies:** `mail-parser` has the `full_encoding` feature on (G40). `mail-sync` uses `mail-parser`, `rand` (jitter) and `tracing`. No new approved crate.
+- **CI:** the Stalwart job also runs `cargo test -p mail-sync --test stalwart -- --ignored`.
+
+### Tests added (33 local, plus 2 in CI; workspace total 137 local)
+- **T01** (`tests/sync.rs`): 300 INBOX messages, 250 of them in the window.
+  - Exactly 250 headers, newest first.
+  - Progress events at 100, 200 and 250, and INBOX rows announced before the account is Idle.
+  - Every INBOX header fetch happens before any other folder is selected. The order is INBOX, Drafts, Sent, Archive, then the rest.
+  - Bodies only for the newest 200 (UIDs 101–300), with clean previews and `body_state = full`.
+- **T02:** a server-side UIDVALIDITY change fires `FolderReset`. The cache then holds exactly the renumbered UIDs, with UIDVALIDITY and counters updated.
+- **T04 (row part):** an expunge elsewhere removes the row within 2 s, with QRESYNC (VANISHED) and on plain IMAP (SEARCH ALL).
+- **T05 (list part):** delivered mail is in the list within 2 s through IDLE.
+- **T07:** the second header batch never completes, and the process is killed during the backoff. Exactly one batch was committed. After a restart on a reopened store: 350 rows, 350 distinct UIDs, the exact server UID set, and the integrity and FTS content checks pass.
+- **T08** (`tests/backoff.rs`, paused tokio time):
+  - With the port blocked, the announced delays are 2, 4, 8, … 256, 300, 300 s, each within ±20%. Each actual reconnect gap matches its announced delay within 5 ms. The UI sees Backoff with the network error.
+  - The account recovers to Idle once unblocked.
+  - After 61 s healthy, a new failure starts again at 2 s.
+  - Throttled: exactly 10 minutes.
+  - BYE: one immediate reconnect, then backoff.
+- **T09 with actors:** after revocation and a BYE, Alice goes to NeedsAttention with `auth_failed` and exactly one login, and none over the next 3 s. Bob keeps syncing new mail. Retry brings Alice back once the password is fixed.
+- **Procedure:**
+  - Flags set elsewhere are pulled with and without CONDSTORE, and `\Deleted` rows are hidden and uncounted.
+  - A QRESYNC resync of 600 cached messages is one flag command and no `SEARCH ALL`.
+  - A folder deleted on the server is purged on the next LIST. Gmail All Mail starts unsynced.
+  - With 4 watched folders, IDLE connections are capped: 5 connections in all.
+  - `refresh` and `open_folder` sync on request.
+  - The enabled switch works. A missing keychain password means NeedsAttention.
+- **Unit tests:** backoff schedule and jitter bounds; header decoding with fallbacks; body and attachment part selection; charsets (base64, QP, ISO-8859-1, a bogus label falling back to UTF-8 and Windows-1252, Shift_JIS); previews; folder order; the queue's priorities and deduplication.
+- **`mail-store`:** 5 sync-query tests, and `fts_concurrency` (searches and integrity checks during concurrent body writes).
+- **`mail-imap`:** `uid_fetch_changes` on the fake; `fail_after`.
+- **Stalwart, CI only:** T05 (SMTP delivery to port 25, listed within 2 s plus server latency) and T04 (`UID EXPUNGE` from a second real connection removes the row).
+- **Checks run here:**
+  - `npm --prefix ui run build`.
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --workspace --all-targets -- -D warnings`.
+  - `cargo test --workspace`: 137 passed, 5 ignored. The sync suites ran several times in a row with no flakes.
+  - `npm test`: 18 passed. `npm run lint`: 0 errors, 0 warnings.
+  - `node scripts/check-deps.mjs`.
+
+### Deviations
+None from spec v0.10. v0.10 records the owner's decisions G35–G38.
+
+### Gaps found
+- **G35–G38:** resolved by the owner (see above).
+- **G39 and G40** (interpretations, owner to ratify):
+  - G39: the prefetch skip rule.
+  - G40: throttle shown as Backoff; a `store-changed` with no folder for folder-list changes; `full_encoding`.
+- **Found in testing:** `PRAGMA integrity_check` on a pooled read-only connection reported `fts5: corruption found` while the writer was updating the FTS index. A check on another connection at the same moment said `ok`, and 800 concurrent searches on the readers never failed. The check now runs on the writer, and `tests/fts_concurrency.rs` covers this.
+- **Not in M3's scope:**
+  - Pending ops (step 3 and the overlay in step 5) arrive in M6.
+  - The core and app wiring of actors and events arrives in M4.
+- **Not scheduled:** no milestone row names `folder.extend_window` (Load older, sections 3 and 12). Sync's window logic already allows it, because older cached rows stay put. The owner should pick its milestone.
+
+### Next
+M4 (UI shell).
