@@ -1,0 +1,13 @@
+/target/
+/node_modules/
+/ui/node_modules/
+/ui/dist/
+/src-tauri/gen/schemas/
+/tests/perf/results/
+/tests/fixtures/generated/
+*.db
+*.db-wal
+*.db-shm
+*.corrupt
+.DS_Store
+Thumbs.db

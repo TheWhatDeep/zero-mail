@@ -1,0 +1,21 @@
+[package]
+name = "mail-imap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Compiles the in-memory fake server (src/fake.rs) for other crates' tests.
+# Only ever enabled from [dev-dependencies] (SPEC_GAPS G14).
+fake = []
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros", "test-util"] }

@@ -1,0 +1,111 @@
+/*
+ * Base styles and motion primitives. Values come only from tokens.css.
+ *
+ * Motion rule (SPEC_GAPS G8): every interaction gets feedback, but only through opacity and
+ * transform. Hover, active and selected tints are drawn by a ::before overlay whose opacity
+ * fades; background-color itself never transitions. Under prefers-reduced-motion the duration
+ * tokens are 0 ms and the scale tokens are 1, so everything below becomes instant.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  font-weight: var(--font-weight-regular);
+  color: var(--color-ink);
+  background: var(--color-surface-main);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+/* Tint overlay. Set --tint on the element; the overlay fades in on hover, or stays on with
+ * .is-active / [aria-selected="true"]. */
+.tint {
+  position: relative;
+  isolation: isolate;
+}
+
+.tint::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--tint, var(--color-row-hover));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-duration) var(--motion-ease-out);
+}
+
+.tint:hover::before,
+.tint.is-active::before,
+.tint[aria-selected="true"]::before {
+  opacity: 1;
+}
+
+/* Press feedback: a small scale "pop" while held. */
+.press {
+  transition: transform var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.press:active {
+  transform: scale(var(--motion-press-scale));
+}
+
+/* One-shot entrances for elements that mount without a Svelte transition. */
+@keyframes zm-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes zm-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(var(--motion-pop-scale));
+  }
+}
+
+.fade-in {
+  animation: zm-fade-in var(--motion-duration) var(--motion-ease-out) both;
+}
+
+.pop-in {
+  animation: zm-pop-in var(--motion-duration) var(--motion-ease-out) both;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

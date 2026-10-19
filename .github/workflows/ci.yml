@@ -1,0 +1,147 @@
+# BUILD.md section 15/16 and A6: every automated test green on all three OSes.
+# Actions are pinned to full commit SHAs of releases at least two weeks old.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["m*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "24"
+
+jobs:
+  checks:
+    name: Boundaries, freshness, format, audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable, 2026-10-01
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2.87.24
+        with:
+          tool: cargo-audit
+      - run: node scripts/check-deps.mjs --online
+      - run: cargo fmt --all -- --check
+      - run: cargo audit
+      - run: npm ci
+      - run: npm audit --audit-level=low
+      - run: npm ci
+        working-directory: ui
+      - run: npm audit --audit-level=low
+        working-directory: ui
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux Tauri prerequisites (WebKitGTK 4.1)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libdbus-1-dev patchelf
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable, 2026-10-01
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: npm ci
+      - run: npm ci
+        working-directory: ui
+      - name: Frontend lint
+        run: npm run lint
+        working-directory: ui
+      - name: Frontend tests
+        run: npm test
+        working-directory: ui
+      # tauri::generate_context! embeds ui/dist, so the frontend is built before Rust compiles.
+      - name: Frontend build
+        run: npm run build
+        working-directory: ui
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Backend tests
+        run: cargo test --workspace
+
+  integration:
+    name: Stalwart integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Start Stalwart
+        run: docker compose -f tests/docker/compose.yml up -d --wait
+      - name: Smoke check
+        run: node tests/docker/smoke.mjs
+      - name: Stalwart logs
+        if: failure()
+        run: docker compose -f tests/docker/compose.yml logs
+      - name: Stop Stalwart
+        if: always()
+        run: docker compose -f tests/docker/compose.yml down -v
+
+  perf:
+    name: Startup harness (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux Tauri prerequisites (WebKitGTK 4.1)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libdbus-1-dev patchelf xvfb
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable, 2026-10-01
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: npm ci
+      - run: npm ci
+        working-directory: ui
+      - name: Release build
+        run: npx tauri build --no-bundle
+      - name: Measure startup
+        if: runner.os != 'Linux'
+        run: node tests/perf/startup.mjs --runs 5
+      - name: Measure startup (virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node tests/perf/startup.mjs --runs 5
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: startup-${{ matrix.os }}
+          path: tests/perf/results/startup.json

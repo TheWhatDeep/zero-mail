@@ -1,0 +1,17 @@
+[package]
+name = "mail-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mail-imap.workspace = true
+mail-store.workspace = true
+mail-auth.workspace = true
+
+[dev-dependencies]
+mail-imap = { workspace = true, features = ["fake"] }

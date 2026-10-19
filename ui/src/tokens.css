@@ -1,0 +1,313 @@
+/*
+ * tokens.css: the only place visual values are defined (BUILD.md section 11, guardrail 2).
+ * Source: the Dispatch design handoff, screen 3a (DESIGN_SYSTEM.md), with these owner
+ * decisions (SPEC_GAPS.md):
+ *   G3  Geist is bundled locally; the system stack is the fallback.
+ *   G4  Glass is flattened to opaque surfaces: no backdrop-filter, no transparent window.
+ *   G5  Dark values are derived from the same zinc and Broadsheet accent ramps.
+ *   G8  Motion: opacity and scale only, 150 ms or less, none under prefers-reduced-motion.
+ * Every other stylesheet uses var(--...) from this file and contains no literal colors.
+ */
+
+@font-face {
+  font-family: "Geist";
+  src: url("./assets/fonts/Geist-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("./assets/fonts/Geist-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "Geist";
+  src: url("./assets/fonts/Geist-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  color-scheme: light;
+
+  /* Typography (DESIGN_SYSTEM.md, Typography) */
+  --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --text-pane-title: 18px;
+  --text-subject: 17px;
+  --text-base: 13px;
+  --text-button-compact: 12.5px;
+  --text-meta: 12px;
+  --text-meta-small: 11.5px;
+  --text-tag: 11px;
+  --text-avatar-28: 10px;
+  --text-avatar-32: 11px;
+  --text-avatar-36: 12px;
+  --leading-base: 1.45;
+  --leading-body: 1.6;
+  --leading-subject: 1.3;
+  --tracking-title: -0.01em;
+  --tracking-label: 0.06em;
+
+  /* Neutrals (zinc) */
+  --color-ink: #18181b;
+  --color-ink-hover: #3f3f46;
+  --color-icon: #3f3f46;
+  --color-text-body: #3f3f46;
+  --color-text-muted-strong: #52525b;
+  --color-text-muted: #71717a;
+  --color-border-control: #d4d4d8;
+  --color-border: #e4e4e7;
+  --color-divider: #f0f0f2;
+  --color-divider-row: #f4f4f5;
+  --color-surface-sunken: #f7f7f8;
+  --color-row-hover: #fafafa;
+  --color-button-hover: #f4f4f5;
+  --color-white: #ffffff;
+  --color-avatar-bg: #f4f4f5;
+
+  /* Surfaces: glass flattened to opaque (G4) */
+  --color-surface-main: #f4f4f6;
+  --color-card: #fefefe;
+  --color-card-reading: #fefefe;
+  --color-border-on-glass: rgba(0, 0, 0, 0.08);
+  --color-border-input: rgba(0, 0, 0, 0.09);
+  --color-input-bg: #fefefe;
+
+  /* Primary button: black is the primary (principle 4) */
+  --color-primary-bg: #18181b;
+  --color-primary-bg-hover: #3f3f46;
+  --color-primary-fg: #ffffff;
+  --color-secondary-bg: #ffffff;
+  --color-secondary-fg: #18181b;
+
+  /* Sidebar: dark tone in both themes */
+  --color-sidebar: #1e1917;
+  --color-sidebar-outline: rgba(255, 255, 255, 0.06);
+  --color-sidebar-text: rgba(255, 255, 255, 0.9);
+  --color-sidebar-text-strong: #ffffff;
+  --color-sidebar-icon-opacity: 0.7;
+  --color-sidebar-active-row: rgba(0, 0, 0, 0.3);
+  --color-sidebar-active-inset: rgba(255, 255, 255, 0.04);
+  --color-sidebar-hover: rgba(255, 255, 255, 0.05);
+  --color-sidebar-rule: rgba(255, 255, 255, 0.08);
+  --color-sidebar-label: rgba(255, 255, 255, 0.5);
+  --color-sidebar-meta: rgba(255, 255, 255, 0.5);
+  --color-sidebar-badge-solid: rgba(255, 255, 255, 0.18);
+  --color-sidebar-badge-border: rgba(255, 255, 255, 0.22);
+  --color-sidebar-badge-text: rgba(255, 255, 255, 0.7);
+  --color-sidebar-avatar-bg: rgba(255, 255, 255, 0.14);
+  --color-sidebar-avatar-border: rgba(255, 255, 255, 0.18);
+  --color-sidebar-dot-neutral: rgba(255, 255, 255, 0.4);
+  --color-inverse-pill-bg: #ffffff;
+  --color-inverse-pill-hover: #f4f4f5;
+  --color-inverse-pill-fg: #18181b;
+
+  /* Toast: dark overlay without blur (G4) */
+  --color-toast-bg: rgba(24, 24, 27, 0.86);
+  --color-toast-fg: #ffffff;
+  --color-toast-button-border: rgba(255, 255, 255, 0.2);
+  --color-toast-button-bg: rgba(255, 255, 255, 0.08);
+
+  /* Accents (Broadsheet ramps). Cyan = unread, selected, focus. Magenta = starred. */
+  --color-accent: #0088b0;
+  --color-accent-100: #e9f8ff;
+  --color-accent-200: #cbeeff;
+  --color-accent-400: #62c5ee;
+  --color-accent-600: #1186ac;
+  --color-accent-700: #006786;
+  --color-accent-800: #004961;
+  --color-accent-900: #0a303e;
+  --color-accent-2: #d6006c;
+  --color-accent-2-100: #fff1f4;
+  --color-accent-2-200: #ffdee6;
+  --color-accent-2-400: #ff90b1;
+  --color-accent-2-800: #790e3d;
+  --color-unread-dot: #0088b0;
+  --color-selected-row: #e9f8ff;
+  --color-text-muted-on-selected: #52525b;
+  --color-file-icon: #006786;
+  --color-star: #d6006c;
+  --color-focus-ring: #0088b0;
+  --color-highlight-bg: #cbeeff;
+  --color-highlight-fg: #0a303e;
+  --color-tag-bg: #f4f4f5;
+  --color-tag-border: #e4e4e7;
+  --color-tag-fg: #52525b;
+
+  /* Message bodies always render on white, in every theme (section 8). */
+  --color-message-canvas: #ffffff;
+
+  /* Spacing steps used by the design */
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-18: 18px;
+  --space-20: 20px;
+  --space-22: 22px;
+  --space-26: 26px;
+
+  /* Layout */
+  --sidebar-width: 240px;
+  --reading-width: 420px;
+  --control-height: 40px;
+  --button-height: 34px;
+  --button-height-small: 28px;
+  --icon-button-38: 38px;
+  --icon-button-32: 32px;
+  --icon-button-28: 28px;
+  --avatar-28: 28px;
+  --avatar-32: 32px;
+  --avatar-36: 36px;
+  --icon-17: 17px;
+  --icon-16: 16px;
+  --icon-15: 15px;
+  --icon-14: 14px;
+  --icon-12: 12px;
+  --dot-unread: 7px;
+  --dot-label: 8px;
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* Density: comfortable (default) */
+  --row-pad-y: 11px;
+  --sidebar-row-pad-y: 9px;
+
+  /* Radius */
+  --radius-keycap: 5px;
+  --radius-tag: 6px;
+  --radius-small-button: 7px;
+  --radius-segment: 8px;
+  --radius-button: 9px;
+  --radius-track: 10px;
+  --radius-input: 12px;
+  --radius-window: 14px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+  --radius-round: 50%;
+
+  /* Elevation */
+  --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.03);
+  --shadow-thumb: 0 1px 2px rgba(0, 0, 0, 0.12);
+  --shadow-inverse-pill: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.25);
+
+  /* Motion (G8): opacity and scale only, never longer than 150 ms */
+  --motion-duration: 150ms;
+  --motion-duration-fast: 100ms;
+  --motion-ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --motion-pop-scale: 0.96;
+  --motion-press-scale: 0.97;
+}
+
+/* Compact density (section 11) */
+:root[data-density="compact"] {
+  --row-pad-y: 6px;
+  --sidebar-row-pad-y: 6px;
+}
+
+/* Dark theme (G5). Kept in two selectors with identical bodies: an explicit choice and the
+ * system preference. Edit both together; ui/src/tokens.test.ts checks they match. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-ink: #f4f4f5;
+  --color-ink-hover: #d4d4d8;
+  --color-icon: #d4d4d8;
+  --color-text-body: #d4d4d8;
+  --color-text-muted-strong: #a1a1aa;
+  --color-text-muted: #a1a1aa;
+  --color-border-control: #52525b;
+  --color-border: #3f3f46;
+  --color-divider: #27272a;
+  --color-divider-row: #27272a;
+  --color-surface-sunken: #1f1f23;
+  --color-row-hover: #222226;
+  --color-button-hover: #27272a;
+  --color-avatar-bg: #27272a;
+  --color-surface-main: #0f0f11;
+  --color-card: #18181b;
+  --color-card-reading: #18181b;
+  --color-border-on-glass: rgba(255, 255, 255, 0.08);
+  --color-border-input: rgba(255, 255, 255, 0.1);
+  --color-input-bg: #18181b;
+  --color-primary-bg: #f4f4f5;
+  --color-primary-bg-hover: #d4d4d8;
+  --color-primary-fg: #18181b;
+  --color-secondary-bg: #18181b;
+  --color-secondary-fg: #f4f4f5;
+  --color-sidebar: #141110;
+  --color-unread-dot: #62c5ee;
+  --color-selected-row: #0a303e;
+  --color-text-muted-on-selected: #a1a1aa;
+  --color-file-icon: #62c5ee;
+  --color-star: #ff90b1;
+  --color-focus-ring: #62c5ee;
+  --color-highlight-bg: #004961;
+  --color-highlight-fg: #e9f8ff;
+  --color-tag-bg: #27272a;
+  --color-tag-border: #3f3f46;
+  --color-tag-fg: #d4d4d8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-ink: #f4f4f5;
+    --color-ink-hover: #d4d4d8;
+    --color-icon: #d4d4d8;
+    --color-text-body: #d4d4d8;
+    --color-text-muted-strong: #a1a1aa;
+    --color-text-muted: #a1a1aa;
+    --color-border-control: #52525b;
+    --color-border: #3f3f46;
+    --color-divider: #27272a;
+    --color-divider-row: #27272a;
+    --color-surface-sunken: #1f1f23;
+    --color-row-hover: #222226;
+    --color-button-hover: #27272a;
+    --color-avatar-bg: #27272a;
+    --color-surface-main: #0f0f11;
+    --color-card: #18181b;
+    --color-card-reading: #18181b;
+    --color-border-on-glass: rgba(255, 255, 255, 0.08);
+    --color-border-input: rgba(255, 255, 255, 0.1);
+    --color-input-bg: #18181b;
+    --color-primary-bg: #f4f4f5;
+    --color-primary-bg-hover: #d4d4d8;
+    --color-primary-fg: #18181b;
+    --color-secondary-bg: #18181b;
+    --color-secondary-fg: #f4f4f5;
+    --color-sidebar: #141110;
+    --color-unread-dot: #62c5ee;
+    --color-selected-row: #0a303e;
+    --color-text-muted-on-selected: #a1a1aa;
+    --color-file-icon: #62c5ee;
+    --color-star: #ff90b1;
+    --color-focus-ring: #62c5ee;
+    --color-highlight-bg: #004961;
+    --color-highlight-fg: #e9f8ff;
+    --color-tag-bg: #27272a;
+    --color-tag-border: #3f3f46;
+    --color-tag-fg: #d4d4d8;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration: 0ms;
+    --motion-duration-fast: 0ms;
+    --motion-pop-scale: 1;
+    --motion-press-scale: 1;
+  }
+}

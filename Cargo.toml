@@ -1,0 +1,88 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mail-store",
+    "crates/mail-secrets",
+    "crates/mail-imap",
+    "crates/mail-smtp",
+    "crates/mail-auth",
+    "crates/mail-sync",
+    "crates/mail-outbox",
+    "crates/mail-render",
+    "crates/mail-search",
+    "crates/mail-core",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+# Every third-party crate the spec allows (BUILD.md section 2, v0.7). Versions are the
+# freshness-checked releases from SPEC_GAPS G12; Cargo.lock pins the exact build.
+# A crate is added to a member's [dependencies] only in the milestone that uses it.
+[workspace.dependencies]
+# Internal crates. Direction is enforced by which member lists which (section 16).
+mail-store = { path = "crates/mail-store" }
+mail-secrets = { path = "crates/mail-secrets" }
+mail-imap = { path = "crates/mail-imap" }
+mail-smtp = { path = "crates/mail-smtp" }
+mail-auth = { path = "crates/mail-auth" }
+mail-sync = { path = "crates/mail-sync" }
+mail-outbox = { path = "crates/mail-outbox" }
+mail-render = { path = "crates/mail-render" }
+mail-search = { path = "crates/mail-search" }
+mail-core = { path = "crates/mail-core" }
+
+# Section 2 table.
+tokio = { version = "1.53.3", default-features = false }
+async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12", "ring", "logging"] }
+lettre = { version = "0.11.23", default-features = false }
+mail-parser = { version = "0.11.9" }
+ammonia = { version = "4.2.4" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+keyring = { version = "4.2.0" }
+oauth2 = { version = "5.0.0", default-features = false }
+thiserror = { version = "2.0.21" }
+tracing = { version = "0.1.44" }
+tauri = { version = "2.12.4" }
+tauri-build = { version = "2.7.3" }
+tauri-plugin-notification = { version = "2.7.0" }
+tauri-plugin-opener = { version = "2.7.2" }
+tauri-plugin-dialog = { version = "2.8.3" }
+tauri-plugin-single-instance = { version = "2.5.4" }
+tauri-plugin-autostart = { version = "2.7.0" }
+tauri-plugin-window-state = { version = "2.5.0" }
+
+# Glue crates approved in v0.7 (SPEC_GAPS G13).
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154" }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "std"] }
+tracing-appender = { version = "0.2.5" }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+uuid = { version = "1.28.0", features = ["v4"] }
+sha2 = { version = "0.11.1" }
+rand = { version = "0.10.3" }
+futures = { version = "0.3.34", default-features = false, features = ["std"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+opt-level = 3

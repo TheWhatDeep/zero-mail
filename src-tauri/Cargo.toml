@@ -1,0 +1,18 @@
+[package]
+name = "zero-mail"
+description = "Zero Mail desktop email client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+# `app` depends only on mail-core (BUILD.md section 16).
+[dependencies]
+mail-core.workspace = true
+tauri.workspace = true

@@ -1,0 +1,124 @@
+# Stalwart v0.15.5 hermetic integration-test server. Not read by v0.16+.
+# Test accounts (password = "<name>-test-pw"); log in with the bare name (alice, bob, carol).
+# No [certificate.*] section: Stalwart generates a self-signed certificate (SAN "localhost")
+# at every start. Tests pin its SHA-256, the same path real users take for self-hosted servers.
+
+[server]
+hostname = "mail.test.local"
+
+[server.listener."smtp"]
+bind = ["0.0.0.0:25"]
+protocol = "smtp"
+
+[server.listener."submission"]
+bind = ["0.0.0.0:587"]
+protocol = "smtp"
+
+[server.listener."submissions"]
+bind = ["0.0.0.0:465"]
+protocol = "smtp"
+tls.implicit = true
+
+[server.listener."imap"]
+bind = ["0.0.0.0:143"]
+protocol = "imap"
+
+[server.listener."imaptls"]
+bind = ["0.0.0.0:993"]
+protocol = "imap"
+tls.implicit = true
+
+# Negative auth tests (T09) must not get the runner banned.
+[server.auto-ban.auth]
+rate = false
+[server.auto-ban.abuse]
+rate = false
+[server.auto-ban.loiter]
+rate = false
+[server.auto-ban.scan]
+rate = false
+
+[storage]
+data = "rocksdb"
+fts = "rocksdb"
+blob = "rocksdb"
+lookup = "rocksdb"
+directory = "memory"
+
+[store."rocksdb"]
+type = "rocksdb"
+path = "/opt/stalwart/data"
+compression = "lz4"
+
+[directory."memory"]
+type = "memory"
+
+[[directory."memory".principals]]
+name = "alice"
+class = "individual"
+description = "Alice Test"
+secret = "alice-test-pw"
+email = ["alice@test.local"]
+
+[[directory."memory".principals]]
+name = "bob"
+class = "individual"
+description = "Bob Test"
+secret = "bob-test-pw"
+email = ["bob@test.local"]
+
+[[directory."memory".principals]]
+name = "carol"
+class = "individual"
+description = "Carol Test"
+secret = "carol-test-pw"
+email = ["carol@test.local", "carol.alias@test.local"]
+
+[tracer."stdout"]
+type = "stdout"
+level = "info"
+ansi = false
+enable = true
+
+# The keys below normally live in Stalwart's database. They are honoured from this file and
+# each logs a "Database key defined in local configuration" warning, which is expected.
+
+# No network on first boot (spam rules and webadmin downloads fail fast, non-fatal).
+[spam-filter]
+enable = false
+resource = "file:///dev/null"
+
+[webadmin]
+resource = "file:///dev/null"
+
+[session.data]
+spam-filter = false
+
+[session.ehlo]
+reject-non-fqdn = false
+
+# No DNS-based sender checks or DKIM signing in tests.
+[auth.spf.verify]
+ehlo = "disable"
+mail-from = "disable"
+
+[auth.dmarc]
+verify = "disable"
+
+[auth.iprev]
+verify = "disable"
+
+[auth.dkim]
+verify = "disable"
+sign = false
+
+[auth.arc]
+verify = "disable"
+seal = false
+
+# First boot injects inbound rate limiters that ignore 'enable'; neutralise via 'match'.
+[queue.limiter.inbound.ip]
+match = "false"
+
+[queue.limiter.inbound.sender]
+match = "false"

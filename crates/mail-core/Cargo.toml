@@ -1,0 +1,20 @@
+[package]
+name = "mail-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mail-store.workspace = true
+mail-secrets.workspace = true
+mail-imap.workspace = true
+mail-smtp.workspace = true
+mail-auth.workspace = true
+mail-sync.workspace = true
+mail-outbox.workspace = true
+mail-render.workspace = true
+mail-search.workspace = true

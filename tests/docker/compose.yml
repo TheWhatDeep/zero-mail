@@ -1,0 +1,33 @@
+# Stalwart integration server (BUILD.md section 15). Test-only: every port binds to
+# 127.0.0.1 and the data store is tmpfs, so each run starts with empty mailboxes.
+# Pinned to v0.15.5, the last release that reads config.toml (SPEC_GAPS G15).
+# Start and wait for health:  docker compose -f tests/docker/compose.yml up -d --wait
+name: zeromail-test
+
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:v0.15.5
+    container_name: zeromail-stalwart
+    entrypoint: ["/usr/local/bin/stalwart", "--config", "/opt/stalwart/etc/config.toml"]
+    volumes:
+      - ./stalwart/config.toml:/opt/stalwart/etc/config.toml:ro
+    tmpfs:
+      - /opt/stalwart/data
+    ports:
+      - "127.0.0.1:3025:25"    # SMTP delivery (no AUTH)
+      - "127.0.0.1:3587:587"   # Submission, STARTTLS
+      - "127.0.0.1:3465:465"   # Submission, implicit TLS
+      - "127.0.0.1:3143:143"   # IMAP, STARTTLS
+      - "127.0.0.1:3993:993"   # IMAP, implicit TLS
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/143 && timeout 3 head -c 4 <&3 | grep -q OK &&
+          exec 4<>/dev/tcp/127.0.0.1/25 && timeout 3 head -c 3 <&4 | grep -q 220
+      interval: 2s
+      timeout: 8s
+      retries: 30
+      start_period: 5s
