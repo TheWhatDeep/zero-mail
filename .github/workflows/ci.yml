@@ -76,8 +76,16 @@ jobs:
         working-directory: ui
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Failing tests are also published as annotations, which can be read without
+      # signing in to the logs.
       - name: Backend tests
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log || {
+            grep -E "^test .* FAILED$|panicked at|^thread '.*' .*panicked" -A3 test.log | head -40 | sed 's/^/::error title=cargo test::/'
+            exit 1
+          }
 
   integration:
     name: Stalwart integration
