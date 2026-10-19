@@ -130,8 +130,13 @@ jobs:
         working-directory: ui
       - name: Release build
         run: npx tauri build --no-bundle
-      - name: Measure startup
-        run: node tests/perf/startup.mjs --runs 5
+      - name: Generate the 50,000-message fixture
+        run: cargo run --release -p mail-store --example fixture -- tests/fixtures/generated/perf 50000
+      # Startup is enforced (SPEC_GAPS G44); scrolling is measured and its DOM rows enforced.
+      # 60 fps is checked on the owner's machine (G41): a hosted runner's frame rate says
+      # little about a real display.
+      - name: Measure startup and scrolling
+        run: node tests/perf/startup.mjs --data tests/fixtures/generated/perf --runs 5 --scroll --enforce
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: startup-windows-2025

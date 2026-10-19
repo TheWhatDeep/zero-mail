@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-account-update"
+description = "Enables the account_update command without any pre-configured scope."
+commands.allow = ["account_update"]
+
+[[permission]]
+identifier = "deny-account-update"
+description = "Denies the account_update command without any pre-configured scope."
+commands.deny = ["account_update"]

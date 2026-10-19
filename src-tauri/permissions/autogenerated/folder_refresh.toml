@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-folder-refresh"
+description = "Enables the folder_refresh command without any pre-configured scope."
+commands.allow = ["folder_refresh"]
+
+[[permission]]
+identifier = "deny-folder-refresh"
+description = "Denies the folder_refresh command without any pre-configured scope."
+commands.deny = ["folder_refresh"]

@@ -359,6 +359,29 @@ impl Store {
         self.write(|tx| queries::integrity_check(tx)).await
     }
 
+    /// One message's header row.
+    pub async fn get_message(&self, message_id: MessageId) -> Result<MessageRecord> {
+        self.read(move |conn| queries::get_message(conn, message_id))
+            .await
+    }
+
+    /// A message's attachment metadata (section 8: listed without downloading).
+    pub async fn list_attachments(&self, message_id: MessageId) -> Result<Vec<NewAttachment>> {
+        self.read(move |conn| queries::list_attachments(conn, message_id))
+            .await
+    }
+
+    /// A message's cached body, if it has one.
+    pub async fn get_body(&self, message_id: MessageId) -> Result<Option<Body>> {
+        self.read(move |conn| queries::get_body(conn, message_id))
+            .await
+    }
+
+    /// `PRAGMA quick_check` on the writer; `Corrupt` when it fails (SPEC_GAPS G48).
+    pub async fn quick_check(&self) -> Result<()> {
+        self.write(|tx| queries::quick_check(tx)).await
+    }
+
     /// One page of a folder, newest first by `(date, id)`, after `cursor`.
     pub async fn folder_page(
         &self,

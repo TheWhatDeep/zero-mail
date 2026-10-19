@@ -19,19 +19,29 @@ pub const PART_LIMIT: u64 = 1024 * 1024;
 /// Preview length in characters (section 8).
 pub const PREVIEW_CHARS: usize = 140;
 
-/// Fetches and decodes a message's body parts. `None` when a text part is over the limit.
+/// Why a body is fetched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Purpose {
+    /// Background prefetch: a message with a text part over 1 MB is skipped (G39).
+    Prefetch,
+    /// The user opened it: parts over 1 MB are cut there, and the state is `text` (G35).
+    Open,
+}
+
+/// Fetches and decodes a message's body parts. `None` when prefetch skips the message.
 pub(crate) async fn fetch_body<T: ImapTransport>(
     t: &mut T,
     uid: u32,
     root: &BodyPart,
     now: i64,
+    purpose: Purpose,
 ) -> Result<Option<(Body, BodyState)>, ImapError> {
     let parts = text_parts(root);
-    if [parts.plain, parts.html]
+    let oversize = [parts.plain, parts.html]
         .iter()
         .flatten()
-        .any(|p| p.size > PART_LIMIT)
-    {
+        .any(|p| p.size > PART_LIMIT);
+    if oversize && purpose == Purpose::Prefetch {
         return Ok(None);
     }
     let plain = fetch_text(t, uid, parts.plain).await?;
@@ -47,7 +57,11 @@ pub(crate) async fn fetch_body<T: ImapTransport>(
             text_html: html,
             fetched_at: now,
         },
-        BodyState::Full,
+        if oversize {
+            BodyState::Text
+        } else {
+            BodyState::Full
+        },
     )))
 }
 
@@ -58,7 +72,10 @@ async fn fetch_text<T: ImapTransport>(
 ) -> Result<String, ImapError> {
     match part {
         Some(p) => {
-            let raw = t.uid_fetch_part(uid, &p.part_id, None).await?;
+            let cut = p.size > PART_LIMIT;
+            let raw = t
+                .uid_fetch_part(uid, &p.part_id, cut.then_some(PART_LIMIT))
+                .await?;
             Ok(decode_part(&raw, p))
         }
         None => Ok(String::new()),
@@ -70,11 +87,13 @@ async fn fetch_text<T: ImapTransport>(
 pub(crate) fn decode_part(raw: &[u8], part: &BodyPart) -> String {
     let bytes = match part.encoding.as_deref() {
         Some("base64") => {
-            let compact: Vec<u8> = raw
+            let mut compact: Vec<u8> = raw
                 .iter()
                 .copied()
                 .filter(|b| !b.is_ascii_whitespace())
                 .collect();
+            // A part cut at the size cap may end mid-quantum.
+            compact.truncate(compact.len() / 4 * 4);
             base64_decode(&compact).unwrap_or_else(|| raw.to_vec())
         }
         Some("quoted-printable") => quoted_printable_decode(raw).unwrap_or_else(|| raw.to_vec()),

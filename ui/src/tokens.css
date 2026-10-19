@@ -36,6 +36,8 @@
 
   /* Typography (DESIGN_SYSTEM.md, Typography) */
   --font-sans: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Certificate fingerprints only: the system monospace stack (nothing is bundled). */
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
@@ -180,9 +182,30 @@
   --focus-ring-width: 2px;
   --focus-ring-offset: 2px;
 
-  /* Density: comfortable (default) */
+  /* Density: comfortable (default). --row-height is the list row's fixed height for
+   * virtualization: the 28px avatar plus the row padding. */
   --row-pad-y: 11px;
   --sidebar-row-pad-y: 9px;
+  --row-height: 50px;
+  --sender-width: 120px;
+  --date-width: 64px;
+  --badge-min-width: 24px;
+  --form-width: 560px;
+  --port-width: 88px;
+  --security-width: 120px;
+  --disabled-opacity: 0.5;
+  --list-header-height: 41px;
+  --status-bar-height: 28px;
+  --dot-status: 8px;
+  --skeleton-line: 9px;
+
+  /* Account status dots: existing palette values, no new colors */
+  --color-status-idle: var(--color-accent);
+  --color-status-busy: var(--color-accent-400);
+  --color-status-waiting: var(--color-text-muted);
+  --color-status-attention: var(--color-accent-2);
+  --color-status-off: var(--color-border-control);
+  --color-skeleton: var(--color-divider-row);
 
   /* Radius */
   --radius-keycap: 5px;
@@ -215,6 +238,7 @@
 :root[data-density="compact"] {
   --row-pad-y: 6px;
   --sidebar-row-pad-y: 6px;
+  --row-height: 40px;
 }
 
 /* Dark theme (G5). Kept in two selectors with identical bodies: an explicit choice and the

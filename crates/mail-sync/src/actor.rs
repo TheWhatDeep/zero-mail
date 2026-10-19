@@ -9,7 +9,9 @@ use mail_imap::{
     BodyPart, ConnectConfig, Credentials, ErrorClass, HeaderFetch, IdleEvent, ImapConnector,
     ImapError, ImapTransport, Security, UidSet, CONNECT_TIMEOUT, FETCH_BATCH, IDLE_REISSUE,
 };
-use mail_store::{Account, AccountId, Folder, FolderId, PrefetchItem, SpecialUse, Store};
+use mail_store::{
+    Account, AccountId, Folder, FolderId, MessageId, PrefetchItem, SpecialUse, Store,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
@@ -44,6 +46,7 @@ impl<C, L> Clone for SyncDeps<C, L> {
 #[derive(Debug)]
 enum Command {
     Refresh(FolderId),
+    FetchBody(MessageId),
     OpenFolder(Option<FolderId>),
     AccountChanged,
     Retry,
@@ -66,6 +69,12 @@ impl AccountHandle {
     /// `folder.refresh`: sync the folder now, ahead of background work (priority 1).
     pub fn refresh(&self, folder_id: FolderId) {
         let _ = self.commands.send(Command::Refresh(folder_id));
+    }
+
+    /// The user opened a message whose body is not cached: fetch it ahead of everything
+    /// else (section 6, step 8).
+    pub fn fetch_body(&self, message_id: MessageId) {
+        let _ = self.commands.send(Command::FetchBody(message_id));
     }
 
     /// The folder open in the UI: it syncs now and every 5 minutes while open.
@@ -164,6 +173,8 @@ enum Job {
         item: PrefetchItem,
         structure: Box<BodyPart>,
     },
+    /// A body the user is waiting for.
+    Open(MessageId),
 }
 
 impl Job {
@@ -171,6 +182,7 @@ impl Job {
         match (self, other) {
             (Job::Sync(a), Job::Sync(b)) | (Job::Prefetch(a), Job::Prefetch(b)) => a == b,
             (Job::Body { item: a, .. }, Job::Body { item: b, .. }) => a.message_id == b.message_id,
+            (Job::Open(a), Job::Open(b)) => a == b,
             _ => false,
         }
     }
@@ -376,7 +388,7 @@ where
                     None | Some(Command::Shutdown) => return Wake::Shutdown,
                     Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                     Some(Command::OpenFolder(f)) => self.open_folder = f,
-                    Some(Command::Refresh(_)) => {}
+                    Some(Command::Refresh(_) | Command::FetchBody(_)) => {}
                 },
             }
         }
@@ -389,7 +401,7 @@ where
                 None | Some(Command::Shutdown) => return Wake::Shutdown,
                 Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                 Some(Command::OpenFolder(f)) => self.open_folder = f,
-                Some(Command::Refresh(_)) => {}
+                Some(Command::Refresh(_) | Command::FetchBody(_)) => {}
             }
         }
     }
@@ -572,6 +584,7 @@ where
                     queue.push(Priority::User, Job::Sync(id));
                 }
             }
+            Command::FetchBody(id) => queue.push(Priority::User, Job::Open(id)),
             Command::OpenFolder(f) => {
                 self.open_folder = f;
                 open_tick.reset();
@@ -611,6 +624,9 @@ async fn idle_loop<C: ImapConnector>(
 ) -> Result<(), ImapError> {
     let mut conn = connector.connect(config, creds).await?;
     conn.select(path).await?;
+    // Changes between the worker's last sync of this folder and this SELECT would never
+    // be announced; one catch-up sync closes that gap.
+    let _ = tx.send(IdleMsg::Changed(folder_id));
     loop {
         if conn.idle(IDLE_REISSUE).await? == IdleEvent::Changed {
             let _ = tx.send(IdleMsg::Changed(folder_id));
@@ -688,7 +704,7 @@ async fn run_job<T: ImapTransport>(
             if !ensure_selected(t, &folder, selected, queue).await? {
                 return Ok(());
             }
-            match body::fetch_body(t, item.uid, &structure, now()).await {
+            match body::fetch_body(t, item.uid, &structure, now(), body::Purpose::Prefetch).await {
                 Ok(Some((body, state))) => {
                     let preview = body::preview(&body.text_plain);
                     ctx.store
@@ -702,6 +718,36 @@ async fn run_job<T: ImapTransport>(
                 // Too large to prefetch (section 12); opened on demand later.
                 Ok(None) => {}
                 Err(e) => return Err(e.into()),
+            }
+        }
+        Job::Open(message_id) => {
+            let message = ctx.store.get_message(message_id).await?;
+            if message.account_id != ctx.account_id
+                || message.body_state != mail_store::BodyState::None
+            {
+                return Ok(());
+            }
+            let folder = ctx.store.get_folder(message.folder_id).await?;
+            if !ensure_selected(t, &folder, selected, queue).await? {
+                return Ok(());
+            }
+            let headers = t
+                .uid_fetch_headers(&UidSet::single(message.uid), HeaderFetch::default())
+                .await?;
+            let Some(h) = headers.into_iter().next() else {
+                return Err(SyncError::Gone);
+            };
+            if let Some((body, state)) =
+                body::fetch_body(t, message.uid, &h.body, now(), body::Purpose::Open).await?
+            {
+                let preview = body::preview(&body.text_plain);
+                ctx.store
+                    .store_body(message_id, body, state, preview)
+                    .await?;
+                ctx.events.send(SyncEvent::StoreChanged {
+                    account_id: ctx.account_id,
+                    folder_id: Some(folder.id),
+                });
             }
         }
     }

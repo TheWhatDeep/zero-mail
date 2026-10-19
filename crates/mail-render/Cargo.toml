@@ -10,3 +10,8 @@ workspace = true
 
 [dependencies]
 mail-store.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

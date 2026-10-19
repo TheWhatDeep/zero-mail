@@ -2449,6 +2449,9 @@ name = "mail-render"
 version = "0.1.0"
 dependencies = [
  "mail-store",
+ "rand",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

@@ -614,6 +614,97 @@ pub(crate) fn store_body(
     Ok(())
 }
 
+pub(crate) fn get_message(conn: &Connection, id: MessageId) -> Result<MessageRecord> {
+    let (record, to, cc, reply_to) = conn.query_row(
+        "SELECT id, account_id, folder_id, uid, thread_id, message_id, subject, from_name,
+                from_addr, to_json, cc_json, reply_to_json, date_utc, internal_utc, size, flags,
+                has_attach, body_state
+         FROM messages WHERE id = ?1",
+        [id],
+        |r| {
+            let size: i64 = r.get(14)?;
+            Ok((
+                MessageRecord {
+                    id: r.get(0)?,
+                    account_id: r.get(1)?,
+                    folder_id: r.get(2)?,
+                    uid: r.get(3)?,
+                    thread_id: r.get(4)?,
+                    message_id: r.get(5)?,
+                    subject: r.get(6)?,
+                    from: Address {
+                        name: r.get(7)?,
+                        addr: r.get(8)?,
+                    },
+                    to: Vec::new(),
+                    cc: Vec::new(),
+                    reply_to: Vec::new(),
+                    date_utc: r.get(12)?,
+                    internal_utc: r.get(13)?,
+                    size: u64::try_from(size).unwrap_or(0),
+                    flags: Flags(r.get(15)?),
+                    has_attach: r.get(16)?,
+                    body_state: enum_column(r, 17, BodyState::from_sql)?,
+                },
+                r.get::<_, String>(9)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, String>(11)?,
+            ))
+        },
+    )?;
+    Ok(MessageRecord {
+        to: serde_json::from_str(&to)?,
+        cc: serde_json::from_str(&cc)?,
+        reply_to: serde_json::from_str(&reply_to)?,
+        ..record
+    })
+}
+
+pub(crate) fn get_body(conn: &Connection, id: MessageId) -> Result<Option<Body>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT text_plain, text_html, fetched_at FROM bodies WHERE message_id = ?1",
+    )?;
+    let mut rows = stmt.query([id])?;
+    match rows.next()? {
+        Some(r) => Ok(Some(Body {
+            text_plain: r.get(0)?,
+            text_html: r.get(1)?,
+            fetched_at: r.get(2)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// A message's attachment metadata, in part order.
+pub(crate) fn list_attachments(conn: &Connection, id: MessageId) -> Result<Vec<NewAttachment>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT part_id, filename, mime, size, content_id, is_inline FROM attachments
+         WHERE message_id = ?1 ORDER BY id",
+    )?;
+    let rows = stmt.query_map([id], |r| {
+        let size: i64 = r.get(3)?;
+        Ok(NewAttachment {
+            part_id: r.get(0)?,
+            filename: r.get(1)?,
+            mime: r.get(2)?,
+            size: u64::try_from(size).unwrap_or(0),
+            content_id: r.get(4)?,
+            is_inline: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// `PRAGMA quick_check` (section 12, SPEC_GAPS G48).
+pub(crate) fn quick_check(conn: &Connection) -> Result<()> {
+    let result: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt)
+    }
+}
+
 /// `PRAGMA integrity_check` (section 12).
 pub(crate) fn integrity_check(conn: &Connection) -> Result<()> {
     let result: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;

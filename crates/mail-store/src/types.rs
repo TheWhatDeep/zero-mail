@@ -129,6 +129,15 @@ pub enum BodyState {
 }
 
 impl BodyState {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "none" => Some(Self::None),
+            "text" => Some(Self::Text),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -321,6 +330,28 @@ pub struct Body {
 pub struct Cursor {
     pub date_utc: i64,
     pub id: MessageId,
+}
+
+/// A stored message header row, as the reader shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRecord {
+    pub id: MessageId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub uid: u32,
+    pub thread_id: ThreadId,
+    pub message_id: String,
+    pub subject: String,
+    pub from: Address,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    pub reply_to: Vec<Address>,
+    pub date_utc: i64,
+    pub internal_utc: i64,
+    pub size: u64,
+    pub flags: Flags,
+    pub has_attach: bool,
+    pub body_state: BodyState,
 }
 
 /// One message row in a list (section 11, middle pane).

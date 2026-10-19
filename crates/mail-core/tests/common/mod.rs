@@ -32,6 +32,10 @@ impl TempDir {
     pub fn store(&self) -> Store {
         Store::open(&self.0.join("mail.db")).unwrap()
     }
+
+    pub fn path(&self) -> PathBuf {
+        self.0.clone()
+    }
 }
 
 impl Drop for TempDir {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-account-resolve"
+description = "Enables the account_resolve command without any pre-configured scope."
+commands.allow = ["account_resolve"]
+
+[[permission]]
+identifier = "deny-account-resolve"
+description = "Denies the account_resolve command without any pre-configured scope."
+commands.deny = ["account_resolve"]

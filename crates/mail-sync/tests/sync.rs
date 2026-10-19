@@ -455,6 +455,54 @@ async fn flags_from_other_clients_are_pulled_with_and_without_condstore() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opening_an_uncached_message_fetches_it_and_caps_large_parts() {
+    let dir = TempDir::new("open");
+    let store = dir.store();
+    let account = add_account(&store, USER).await;
+    let s = server(&["IMAP4rev1", "IDLE"]);
+    let now = now();
+    // A 1.5 MB text part: never prefetched; opened, it is cut at 1 MB.
+    let big_text = "x".repeat(1_500_000);
+    s.deliver(
+        "INBOX",
+        mail_imap::fake::FakeMessage::simple("big@t", "a@t", USER, "Big", &big_text, now - 30),
+    )
+    .unwrap();
+    // 201 newer messages push the first one out of the prefetch cap as well.
+    for n in 1..=201 {
+        s.deliver("INBOX", msg(n, now - 20 + i64::from(n) / 100))
+            .unwrap();
+    }
+    let (events, mut watch) = Watch::new();
+    let handle = spawn(&store, s.clone(), &logins(), &events, account);
+    watch.state(account, AccountState::Idle).await;
+    let inbox = folder_id(&store, account, "INBOX").await;
+    let big: i64 = dir
+        .raw()
+        .query_row("SELECT id FROM messages WHERE uid = 1", [], |r| r.get(0))
+        .unwrap();
+    eventually(|| dir.count("SELECT count(*) FROM bodies") == 200).await;
+    assert_eq!(
+        store.get_message(big).await.unwrap().body_state,
+        mail_store::BodyState::None
+    );
+
+    handle.fetch_body(big);
+    eventually(|| {
+        dir.count(&format!(
+            "SELECT count(*) FROM bodies WHERE message_id = {big}"
+        )) == 1
+    })
+    .await;
+    let m = store.get_message(big).await.unwrap();
+    assert_eq!(m.body_state, mail_store::BodyState::Text, "cut at 1 MB");
+    let body = store.get_body(big).await.unwrap().unwrap();
+    assert_eq!(body.text_plain.len(), 1024 * 1024);
+    assert!(rows(&store, inbox).await.len() == 202);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_qresync_resync_is_one_flag_command_without_search_all() {
     let dir = TempDir::new("qresync");
     let store = dir.store();
@@ -482,7 +530,16 @@ async fn a_qresync_resync_is_one_flag_command_without_search_all() {
     }
     let calls = s.calls();
     let worker: Vec<_> = calls.iter().filter(|c| c.op != Op::Idle).collect();
-    assert_eq!(worker.iter().filter(|c| c.op == Op::FetchFlags).count(), 1);
+    // Each resync of the 600 cached messages is one flag command, not batches of 500.
+    let syncs = worker
+        .iter()
+        .filter(|c| c.op == Op::Search && c.arg.starts_with("UidFrom"))
+        .count();
+    assert!(syncs >= 1);
+    assert_eq!(
+        worker.iter().filter(|c| c.op == Op::FetchFlags).count(),
+        syncs
+    );
     assert!(
         !worker.iter().any(|c| c.op == Op::Search && c.arg == "All"),
         "VANISHED replaces SEARCH ALL"
