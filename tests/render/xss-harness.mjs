@@ -11,7 +11,7 @@
 // Usage (Windows):
 //   cargo run -p mail-store --example xss_fixture -- tests/fixtures/generated/xss tests/fixtures/xss/corpus.html
 //   node tests/render/xss-harness.mjs --data tests/fixtures/generated/xss [--binary path]
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -46,6 +46,18 @@ if (!data || !existsSync(join(resolve(data), "mail.db"))) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const port = 9300 + Math.floor(Math.random() * 500);
 const dir = mkdtempSync(join(tmpdir(), "zeromail-xss-"));
+// On CI runners WebView2 may not read its environment variables; its documented per-app
+// registry override is set too, on the runner only (never on a developer's machine).
+const REG_KEY = "HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments";
+const onCi = Boolean(process.env.GITHUB_ACTIONS) && process.platform === "win32";
+function reg(args) {
+  try {
+    return execFileSync("reg", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    return String(err.stdout ?? err.message ?? err);
+  }
+}
+if (onCi) reg(["add", REG_KEY, "/v", exe, "/t", "REG_SZ", "/d", `--remote-debugging-port=${port}`, "/f"]);
 const appData = join(dir, "data");
 cpSync(resolve(data), appData, { recursive: true });
 const child = spawn(binary, [], {
@@ -118,10 +130,15 @@ async function connect() {
       return "missing";
     }
   };
+  const policies = onCi
+    ? ["HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", "HKCU\\SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2", "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge"]
+        .map((k) => reg(["query", k, "/s"]).replace(/\s+/g, " ").slice(0, 300))
+        .join(" | ")
+    : "";
   throw new Error(
     `the DevTools port never opened; app exit code ${child.exitCode}; ` +
       `profile [${list(join(dir, "webview2"))}]; EBWebView [${list(join(dir, "webview2", "EBWebView"))}]; ` +
-      `active port ${activePort()}`,
+      `active port ${activePort()}; policies ${policies}`,
   );
 }
 
@@ -243,11 +260,17 @@ try {
 } catch (err) {
   report.error = String(err);
 } finally {
+  if (onCi) reg(["delete", REG_KEY, "/v", exe, "/f"]);
   clearTimeout(deadline);
   ws?.close();
   child.kill();
   await sleep(500);
-  rmSync(dir, { recursive: true, force: true });
+  // WebView2 lets go of its profile a moment after the app exits.
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  } catch {
+    console.error(`could not remove ${dir}`);
+  }
 }
 
 mkdirSync(join(ROOT, "tests", "render", "results"), { recursive: true });
