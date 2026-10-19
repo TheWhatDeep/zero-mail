@@ -2,9 +2,9 @@
 
 Format (CLAUDE.md): built / tests added / deviations (must be none) / gaps found.
 
-## M0: green locally, waiting for CI before tagging (2026-10-19)
+## M0: done, tagged `m0` (2026-10-19)
 
-Every M0 check passes on Windows 10 (Rust 1.99.1, MSVC Build Tools 2022). M0 is "done when" `cargo test` and `npm test` are green **in CI**. There is no GitHub repo yet, so `m0` is not tagged. The Stalwart container has not been run, because the owner chose not to install Docker locally; CI runs it.
+Every M0 check passes locally on Windows 10 (Rust 1.99.1, MSVC Build Tools 2022) and in CI on Windows, macOS and Linux ([run 39222979439](https://github.com/TheWhatDeep/zero-mail/actions/runs/39222979439)). CI covered boundaries and freshness, fmt, `cargo audit`, `npm audit`, lint, clippy, Rust and UI tests on three OSes, the Stalwart container smoke check, and the startup harness on three OSes (results are uploaded as run artifacts). Docker is not installed locally, by the owner choice; the Stalwart checks run in CI.
 
 ### Built
 - **Repo:** `CLAUDE.md` (A3), `SPEC_GAPS.md`, `docs/BUILD.md` amended to v0.7 with the owner's decisions, `docs/MANUAL_TESTS.md` (T31, T32), `.gitignore`, `rustfmt.toml`, `clippy.toml`. Committed on `main`.
@@ -84,6 +84,5 @@ None from spec v0.7. Every departure from v0.6 is an owner decision in SPEC_GAPS
 - G17: Node 22.12+.
 - G18 (open, blocks M2): the AppError code list.
 
-### To finish M0
-1. Create a GitHub repository and push `main`. CI then runs the full suite on all three OSes, plus the Stalwart smoke check and the startup harness.
-2. When CI is green, tag `m0`.
+### Next
+M1 (`store`). M2 is blocked on G18 (the AppError code list).
