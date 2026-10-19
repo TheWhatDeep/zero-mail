@@ -114,6 +114,16 @@ pub trait ImapTransport: Send {
         changed_since: Option<u64>,
     ) -> impl Future<Output = Result<FlagSync, ImapError>> + Send;
 
+    /// `UID FETCH 1:up_to (UID FLAGS MODSEQ) (CHANGEDSINCE m VANISHED)`: every flag change
+    /// since `changed_since` among UIDs up to `up_to`, and with QRESYNC the UIDs that
+    /// vanished. One short command however many messages are cached (section 6, steps 5
+    /// and 6). Fails with `Unsupported("CONDSTORE")` when not advertised.
+    fn uid_fetch_changes(
+        &mut self,
+        up_to: u32,
+        changed_since: u64,
+    ) -> impl Future<Output = Result<FlagSync, ImapError>> + Send;
+
     /// `UID FETCH uid BODY.PEEK[part]<0.max_bytes>`. An empty `part` fetches the whole raw
     /// message (used only by Save source and forward-as-attachment).
     fn uid_fetch_part(

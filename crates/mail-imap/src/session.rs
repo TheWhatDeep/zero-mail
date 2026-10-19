@@ -68,6 +68,8 @@ pub const HEADER_FIELDS: &[&str] = &[
 
 /// Longest server text kept in an error.
 const MAX_SERVER_TEXT: usize = 300;
+/// Most UIDs one VANISHED reply may expand to.
+const MAX_VANISHED: usize = 1_000_000;
 
 /// Connects to real IMAP servers.
 #[derive(Debug, Clone, Copy, Default)]
@@ -619,6 +621,7 @@ fn search_cmd(cmd: Cmd, key: &SearchKey) -> Cmd {
         // UID 0 never matches: an empty set searches nothing.
         SearchKey::Uid(set) if set.is_empty() => cmd.text("UID 0"),
         SearchKey::Uid(set) => cmd.text(format!("UID {}", set.to_imap())),
+        SearchKey::UidFrom(n) => cmd.text(format!("UID {}:*", (*n).max(1))),
         SearchKey::Not(inner) => search_cmd(cmd.text("NOT "), inner),
         SearchKey::Or(a, b) => search_cmd(search_cmd(cmd.text("OR "), a).text(" "), b),
         SearchKey::And(keys) if keys.is_empty() => cmd.text("ALL"),
@@ -933,6 +936,68 @@ impl ImapTransport for ImapSession {
             _ => {}
         })
         .await?;
+        sync.vanished.sort_unstable();
+        sync.vanished.dedup();
+        Ok(sync)
+    }
+
+    async fn uid_fetch_changes(
+        &mut self,
+        up_to: u32,
+        changed_since: u64,
+    ) -> Result<FlagSync, ImapError> {
+        if !self.caps.condstore {
+            return Err(ImapError::Unsupported("CONDSTORE"));
+        }
+        let up_to = up_to.max(1);
+        let vanished = if self.caps.qresync { " VANISHED" } else { "" };
+        let text = format!(
+            "UID FETCH 1:{up_to} (UID FLAGS MODSEQ) (CHANGEDSINCE {changed_since}{vanished})"
+        );
+        let mut sync = FlagSync::default();
+        let mut too_many = false;
+        self.exec(Cmd::new(text), LARGE_FETCH_TIMEOUT, |r| match r {
+            Response::Fetch(_, attrs) => {
+                let mut update = FlagUpdate {
+                    uid: 0,
+                    flags: Vec::new(),
+                    modseq: None,
+                };
+                let mut has_flags = false;
+                for a in attrs {
+                    match a {
+                        AttributeValue::Uid(u) => update.uid = *u,
+                        AttributeValue::Flags(f) => {
+                            update.flags = parse::flags(f);
+                            has_flags = true;
+                        }
+                        AttributeValue::ModSeq(m) => update.modseq = Some(*m),
+                        _ => {}
+                    }
+                }
+                if has_flags && update.uid != 0 && update.uid <= up_to {
+                    sync.updates.push(update);
+                }
+            }
+            Response::Vanished { uids: ranges, .. } => {
+                for range in ranges {
+                    let (lo, hi) = (*range.start(), (*range.end()).min(up_to));
+                    if lo > hi {
+                        continue;
+                    }
+                    if sync.vanished.len() + (hi - lo) as usize > MAX_VANISHED {
+                        too_many = true;
+                        continue;
+                    }
+                    sync.vanished.extend(lo..=hi);
+                }
+            }
+            _ => {}
+        })
+        .await?;
+        if too_many {
+            return Err(ImapError::Protocol("VANISHED list too long".into()));
+        }
         sync.vanished.sort_unstable();
         sync.vanished.dedup();
         Ok(sync)

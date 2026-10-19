@@ -159,7 +159,8 @@ struct State {
     caps: Capabilities,
     users: BTreeMap<String, String>,
     folders: BTreeMap<String, Folder>,
-    faults: VecDeque<(Op, ImapError)>,
+    /// (operation, successful calls still to let through, error).
+    faults: VecDeque<(Op, usize, ImapError)>,
     calls: Vec<Call>,
     modseq: u64,
     next_uidvalidity: u32,
@@ -379,7 +380,13 @@ impl FakeServer {
 
     /// The next call of `op` fails with `error`. Failures queue in order.
     pub fn fail_next(&self, op: Op, error: ImapError) {
-        self.lock().faults.push_back((op, error));
+        self.fail_after(op, 0, error);
+    }
+
+    /// The call of `op` after the next `succeed` successful ones fails with `error`; for
+    /// example, the second header batch of a sync.
+    pub fn fail_after(&self, op: Op, succeed: usize, error: ImapError) {
+        self.lock().faults.push_back((op, succeed, error));
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -426,8 +433,14 @@ impl FakeServer {
             uids: uids.iter().collect(),
             arg: arg.to_string(),
         });
-        if let Some(pos) = s.faults.iter().position(|(o, _)| *o == op) {
-            if let Some((_, err)) = s.faults.remove(pos) {
+        if let Some(pos) = s.faults.iter().position(|(o, _, _)| *o == op) {
+            if let Some(fault) = s.faults.get_mut(pos) {
+                if fault.1 > 0 {
+                    fault.1 -= 1;
+                    return Ok(());
+                }
+            }
+            if let Some((_, _, err)) = s.faults.remove(pos) {
                 return Err(err);
             }
         }
@@ -560,11 +573,17 @@ impl FakeTransport {
         }
         let s = self.server.lock();
         let f = s.folder(&path)?;
-        Ok(f.messages
+        let mut found: Vec<u32> = f
+            .messages
             .iter()
             .filter(|(uid, m)| matches(key, **uid, &m.msg))
             .map(|(uid, _)| *uid)
-            .collect())
+            .collect();
+        // RFC 3501: `n:*` always includes the highest UID, even when it is below n.
+        if let (SearchKey::UidFrom(_), true) = (key, found.is_empty()) {
+            found.extend(f.messages.keys().next_back().copied());
+        }
+        Ok(found)
     }
 
     fn do_fetch_headers(
@@ -857,6 +876,25 @@ impl ImapTransport for FakeTransport {
         self.do_fetch_flags(uids, changed_since)
     }
 
+    async fn uid_fetch_changes(
+        &mut self,
+        up_to: u32,
+        changed_since: u64,
+    ) -> Result<FlagSync, ImapError> {
+        if !self.caps.condstore {
+            return Err(ImapError::Unsupported("CONDSTORE"));
+        }
+        let path = self.selected()?;
+        let all: Vec<u32> = {
+            let s = self.server.lock();
+            let f = s.folder(&path)?;
+            let mut uids: Vec<u32> = f.messages.keys().copied().filter(|u| *u <= up_to).collect();
+            uids.extend(f.vanished.iter().map(|(u, _)| *u).filter(|u| *u <= up_to));
+            uids
+        };
+        self.do_fetch_flags(&UidSet::new(all), Some(changed_since))
+    }
+
     async fn uid_fetch_part(
         &mut self,
         uid: u32,
@@ -1009,6 +1047,7 @@ fn matches(key: &SearchKey, uid: u32, m: &FakeMessage) -> bool {
         SearchKey::Larger(n) => m.raw.len() as u64 > *n,
         SearchKey::Smaller(n) => (m.raw.len() as u64) < *n,
         SearchKey::Uid(set) => set.contains(uid),
+        SearchKey::UidFrom(n) => uid >= *n,
         SearchKey::Not(k) => !matches(k, uid, m),
         SearchKey::Or(a, b) => matches(a, uid, m) || matches(b, uid, m),
         SearchKey::And(keys) => keys.iter().all(|k| matches(k, uid, m)),
@@ -1320,6 +1359,44 @@ mod tests {
         assert!(t.select("INBOX").await.is_ok());
         let ops: Vec<Op> = s.calls().iter().map(|c| c.op).collect();
         assert_eq!(ops, vec![Op::Connect, Op::Connect, Op::Select, Op::Select]);
+    }
+
+    #[tokio::test]
+    async fn changes_since_cover_every_uid_up_to_the_limit() {
+        let s = server(&["IMAP4rev1", "QRESYNC"]);
+        for n in 1..=4 {
+            s.deliver("INBOX", msg(n)).unwrap();
+        }
+        let mut t = s.connect(&config(), &creds(PASS)).await.unwrap();
+        let modseq = t.select("INBOX").await.unwrap().highest_modseq.unwrap();
+        s.set_flags("INBOX", 1, vec![Flag::Seen]).unwrap();
+        s.set_flags("INBOX", 4, vec![Flag::Seen]).unwrap();
+        s.expunge_external("INBOX", 2).unwrap();
+        let sync = t.uid_fetch_changes(3, modseq).await.unwrap();
+        assert_eq!(
+            sync.updates.iter().map(|u| u.uid).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(sync.vanished, vec![2]);
+
+        let plain = server(&["IMAP4rev1"]);
+        let mut t = plain.connect(&config(), &creds(PASS)).await.unwrap();
+        t.select("INBOX").await.unwrap();
+        assert_eq!(
+            t.uid_fetch_changes(10, 1).await.err(),
+            Some(ImapError::Unsupported("CONDSTORE"))
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_after_lets_calls_through_first() {
+        let s = server(&["IMAP4rev1"]);
+        s.fail_after(Op::Noop, 2, ImapError::Timeout);
+        let mut t = s.connect(&config(), &creds(PASS)).await.unwrap();
+        assert!(t.noop().await.is_ok());
+        assert!(t.noop().await.is_ok());
+        assert_eq!(t.noop().await.err(), Some(ImapError::Timeout));
+        assert!(t.noop().await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]

@@ -379,6 +379,251 @@ pub(crate) fn put_body(
     Ok(())
 }
 
+const FOLDER_COLUMNS: &str = "id, account_id, path, delimiter, special_use, uidvalidity, uidnext,
+    highestmodseq, sync_enabled, watch_idle, unread, total, synced_at";
+
+fn folder_row(r: &Row) -> rusqlite::Result<Folder> {
+    let special_use: Option<String> = r.get(4)?;
+    let special_use = match special_use {
+        None => None,
+        Some(text) => Some(SpecialUse::from_sql(&text).ok_or(
+            rusqlite::Error::InvalidColumnType(4, text, rusqlite::types::Type::Text),
+        )?),
+    };
+    let modseq: Option<i64> = r.get(7)?;
+    Ok(Folder {
+        id: r.get(0)?,
+        account_id: r.get(1)?,
+        path: r.get(2)?,
+        delimiter: r.get(3)?,
+        special_use,
+        uidvalidity: r.get(5)?,
+        uidnext: r.get(6)?,
+        highestmodseq: modseq.and_then(|m| u64::try_from(m).ok()),
+        sync_enabled: r.get(8)?,
+        watch_idle: r.get(9)?,
+        unread: r.get(10)?,
+        total: r.get(11)?,
+        synced_at: r.get(12)?,
+    })
+}
+
+pub(crate) fn list_folders(conn: &Connection, account_id: AccountId) -> Result<Vec<Folder>> {
+    let sql = format!("SELECT {FOLDER_COLUMNS} FROM folders WHERE account_id = ?1 ORDER BY path");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map([account_id], folder_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn get_folder(conn: &Connection, folder_id: FolderId) -> Result<Folder> {
+    let sql = format!("SELECT {FOLDER_COLUMNS} FROM folders WHERE id = ?1");
+    Ok(conn.query_row(&sql, [folder_id], folder_row)?)
+}
+
+/// Makes the account's folder rows match a `LIST` result in one transaction: listed paths
+/// not yet known are inserted, and known paths no longer listed are deleted with their
+/// messages (section 12: a folder gone from `LIST` is purged; a rename is delete plus new).
+/// Known folders keep their role and switches, which the user may have changed.
+pub(crate) fn apply_folder_list(
+    tx: &Transaction,
+    account_id: AccountId,
+    listed: &[NewFolder],
+) -> Result<Vec<Folder>> {
+    if listed.iter().any(|f| f.account_id != account_id) {
+        return Err(StoreError::Invalid("folder of another account"));
+    }
+    let known: Vec<(FolderId, String)> = {
+        let mut stmt = tx.prepare_cached("SELECT id, path FROM folders WHERE account_id = ?1")?;
+        let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, path) in &known {
+        if !listed.iter().any(|f| &f.path == path) {
+            delete_folder(tx, *id)?;
+        }
+    }
+    for f in listed {
+        if !known.iter().any(|(_, path)| *path == f.path) {
+            insert_folder(tx, f)?;
+        }
+    }
+    let sql = format!("SELECT {FOLDER_COLUMNS} FROM folders WHERE account_id = ?1 ORDER BY path");
+    let mut stmt = tx.prepare_cached(&sql)?;
+    let rows = stmt.query_map([account_id], folder_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Records UIDVALIDITY the first time a folder is selected, before any message is cached,
+/// so a later change is always detected (invariant 1). A folder that already has one is
+/// left alone.
+pub(crate) fn set_uidvalidity(
+    tx: &Transaction,
+    folder_id: FolderId,
+    uidvalidity: u32,
+) -> Result<()> {
+    let updated = tx.execute(
+        "UPDATE folders SET uidvalidity = ?2 WHERE id = ?1 AND uidvalidity = 0",
+        params![folder_id, uidvalidity],
+    )?;
+    if updated == 0 {
+        // Either unknown or already set; tell the two apart.
+        tx.query_row("SELECT 1 FROM folders WHERE id = ?1", [folder_id], |_| {
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Every cached UID of a folder, ascending, including `\Deleted` rows.
+pub(crate) fn cached_uids(conn: &Connection, folder_id: FolderId) -> Result<Vec<u32>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT uid FROM messages WHERE folder_id = ?1 ORDER BY uid")?;
+    let rows = stmt.query_map([folder_id], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Inserts synced headers and assigns threads (SPEC_GAPS G36): a message with an
+/// `X-GM-THRID` joins the account's thread for it, every other message gets its own
+/// thread until M9. The input `thread_id` is ignored.
+pub(crate) fn insert_synced(
+    tx: &Transaction,
+    folder_id: FolderId,
+    messages: Vec<NewMessage>,
+) -> Result<Vec<MessageId>> {
+    let account_id: AccountId = tx.query_row(
+        "SELECT account_id FROM folders WHERE id = ?1",
+        [folder_id],
+        |r| r.get(0),
+    )?;
+    let mut assigned = Vec::with_capacity(messages.len());
+    for mut m in messages {
+        let existing: Option<ThreadId> = match m.gm_thrid {
+            Some(thrid) => {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT thread_id FROM messages WHERE account_id = ?1 AND gm_thrid = ?2 LIMIT 1",
+                )?;
+                let mut rows = stmt.query(params![account_id, thrid])?;
+                match rows.next()? {
+                    Some(row) => Some(row.get(0)?),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        m.thread_id = match existing {
+            Some(thread) => {
+                tx.execute(
+                    "UPDATE threads SET last_date_utc = max(last_date_utc, ?2) WHERE id = ?1",
+                    params![thread, m.date_utc],
+                )?;
+                thread
+            }
+            None => insert_thread(tx, account_id, m.date_utc, "")?,
+        };
+        assigned.push(m);
+    }
+    insert_messages(tx, folder_id, &assigned)
+}
+
+/// Replaces the flags of cached messages by UID. Returns how many rows changed.
+pub(crate) fn apply_flags(
+    tx: &Transaction,
+    folder_id: FolderId,
+    changes: &[(u32, Flags)],
+) -> Result<usize> {
+    let mut update = tx.prepare_cached(
+        "UPDATE messages SET flags = ?3 WHERE folder_id = ?1 AND uid = ?2 AND flags != ?3",
+    )?;
+    let mut changed = 0;
+    for (uid, flags) in changes {
+        changed += update.execute(params![folder_id, uid, flags.0])?;
+    }
+    Ok(changed)
+}
+
+/// Section 6, step 7: stores the server state and recounts the folder.
+pub(crate) fn finish_folder_sync(
+    tx: &Transaction,
+    folder_id: FolderId,
+    state: &FolderSyncState,
+) -> Result<()> {
+    let modseq = state
+        .highestmodseq
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| StoreError::Invalid("modseq"))?;
+    let updated = tx.execute(
+        "UPDATE folders SET uidvalidity = ?2, uidnext = ?3, highestmodseq = ?4, synced_at = ?5,
+             total = (SELECT count(*) FROM messages WHERE folder_id = ?1 AND (flags & ?6) = 0),
+             unread = (SELECT count(*) FROM messages
+                       WHERE folder_id = ?1 AND (flags & ?6) = 0 AND (flags & ?7) = 0)
+         WHERE id = ?1",
+        params![
+            folder_id,
+            state.uidvalidity,
+            state.uidnext,
+            modseq,
+            state.synced_at,
+            HIDDEN,
+            i64::from(Flags::SEEN),
+        ],
+    )?;
+    match updated {
+        0 => Err(StoreError::NotFound),
+        _ => Ok(()),
+    }
+}
+
+/// Bodyless messages among the folder's newest `limit` (section 6, step 8: the prefetch cap
+/// is the newest 200 messages per folder, whether or not they already have a body).
+pub(crate) fn prefetch_candidates(
+    conn: &Connection,
+    folder_id: FolderId,
+    limit: u32,
+) -> Result<Vec<PrefetchItem>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, uid FROM (
+             SELECT id, uid, body_state, date_utc FROM messages
+             WHERE folder_id = ?1 AND (flags & ?2) = 0
+             ORDER BY date_utc DESC, id DESC LIMIT ?3)
+         WHERE body_state = 'none'
+         ORDER BY date_utc DESC, id DESC",
+    )?;
+    let rows = stmt.query_map(params![folder_id, HIDDEN, limit], |r| {
+        Ok(PrefetchItem {
+            message_id: r.get(0)?,
+            uid: r.get(1)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Stores a fetched body with the preview made from it, in one transaction.
+pub(crate) fn store_body(
+    tx: &Transaction,
+    message_id: MessageId,
+    body: &Body,
+    state: BodyState,
+    preview: &str,
+) -> Result<()> {
+    put_body(tx, message_id, body, state)?;
+    tx.execute(
+        "UPDATE messages SET preview = ?2 WHERE id = ?1",
+        params![message_id, preview],
+    )?;
+    Ok(())
+}
+
+/// `PRAGMA integrity_check` (section 12).
+pub(crate) fn integrity_check(conn: &Connection) -> Result<()> {
+    let result: String = conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt)
+    }
+}
+
 /// The `ListRow` columns, in `list_row` order.
 macro_rules! row_columns {
     () => {

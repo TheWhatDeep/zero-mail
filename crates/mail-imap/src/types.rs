@@ -431,6 +431,9 @@ pub enum SearchKey {
     Larger(u64),
     Smaller(u64),
     Uid(UidSet),
+    /// `UID n:*`: every UID from `n` up. Servers also return the highest UID when it is
+    /// below `n`, so callers filter the result.
+    UidFrom(u32),
     Not(Box<SearchKey>),
     Or(Box<SearchKey>, Box<SearchKey>),
     And(Vec<SearchKey>),

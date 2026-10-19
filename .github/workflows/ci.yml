@@ -94,14 +94,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # Built before the container starts, so its start-up overlaps nothing slow.
       - name: Build container-backed tests
-        run: cargo test -p mail-core --test stalwart --no-run
+        run: cargo test -p mail-core -p mail-sync --test stalwart --no-run
       - name: Start Stalwart
         run: docker compose -f tests/docker/compose.yml up -d --wait
       - name: Smoke check
         run: node tests/docker/smoke.mjs
       # Tests that need the container are #[ignore]d everywhere else (SPEC_GAPS G24).
       - name: Container-backed tests
-        run: cargo test -p mail-core --test stalwart -- --ignored --test-threads=1
+        run: |
+          cargo test -p mail-core --test stalwart -- --ignored --test-threads=1
+          cargo test -p mail-sync --test stalwart -- --ignored --test-threads=1 --nocapture
       - name: Stalwart logs
         if: failure()
         run: docker compose -f tests/docker/compose.yml logs

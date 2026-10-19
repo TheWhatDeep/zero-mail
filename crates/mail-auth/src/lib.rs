@@ -18,9 +18,9 @@ mod xml;
 
 pub use autoconfig::{resolve, HttpGet, AUTOCONFIG_MAX_BYTES};
 pub use http::HttpClient;
-pub use mail_secrets::Secret;
+pub use mail_secrets::{Secret, SecretStore};
 
-use mail_secrets::{key, SecretKind, SecretStore, SecretsError};
+use mail_secrets::{key, SecretKind, SecretsError};
 
 /// Transport security for one endpoint. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,38 @@ pub fn password_login(
         secret,
         method: AuthMethod::Password,
     })
+}
+
+/// Hands out credentials for one login. The sync actors take their logins from here
+/// (section 3: `sync` calls `auth`, which alone calls `secrets`).
+pub trait LoginSource: Send + Sync + 'static {
+    fn login(
+        &self,
+        account_id: i64,
+        username: &str,
+    ) -> impl std::future::Future<Output = Result<Login, AuthError>> + Send;
+}
+
+/// Logins from the OS keychain: the account's app password (M8 adds OAuth refresh).
+#[derive(Debug, Clone)]
+pub struct KeychainLogins {
+    secrets: std::sync::Arc<dyn SecretStore>,
+}
+
+impl KeychainLogins {
+    pub fn new(secrets: std::sync::Arc<dyn SecretStore>) -> Self {
+        Self { secrets }
+    }
+}
+
+impl LoginSource for KeychainLogins {
+    async fn login(&self, account_id: i64, username: &str) -> Result<Login, AuthError> {
+        let secrets = std::sync::Arc::clone(&self.secrets);
+        let username = username.to_string();
+        tokio::task::spawn_blocking(move || password_login(secrets.as_ref(), account_id, &username))
+            .await
+            .map_err(|_| AuthError::Unsupported("keychain access"))?
+    }
 }
 
 /// Saves or replaces an account's password. Blocking (keychain).

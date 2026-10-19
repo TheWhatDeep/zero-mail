@@ -14,6 +14,7 @@ reqwest.workspace = true
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 mail-secrets = { workspace = true, features = ["fake"] }

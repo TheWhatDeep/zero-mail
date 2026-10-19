@@ -94,6 +94,19 @@ pub enum SpecialUse {
 }
 
 impl SpecialUse {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "inbox" => Some(Self::Inbox),
+            "sent" => Some(Self::Sent),
+            "drafts" => Some(Self::Drafts),
+            "trash" => Some(Self::Trash),
+            "junk" => Some(Self::Junk),
+            "archive" => Some(Self::Archive),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Inbox => "inbox",
@@ -209,6 +222,42 @@ pub struct Identity {
     pub id: IdentityId,
     pub account_id: AccountId,
     pub identity: NewIdentity,
+}
+
+/// A stored folder with its sync state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Folder {
+    pub id: FolderId,
+    pub account_id: AccountId,
+    pub path: String,
+    pub delimiter: String,
+    pub special_use: Option<SpecialUse>,
+    /// 0 until the folder is first selected.
+    pub uidvalidity: u32,
+    pub uidnext: u32,
+    pub highestmodseq: Option<u64>,
+    pub sync_enabled: bool,
+    pub watch_idle: bool,
+    pub unread: u32,
+    pub total: u32,
+    /// 0 until a full folder sync has completed once.
+    pub synced_at: i64,
+}
+
+/// The server state a completed folder sync records (section 6, step 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderSyncState {
+    pub uidvalidity: u32,
+    pub uidnext: u32,
+    pub highestmodseq: Option<u64>,
+    pub synced_at: i64,
+}
+
+/// A message whose body the prefetcher may fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefetchItem {
+    pub message_id: MessageId,
+    pub uid: u32,
 }
 
 /// A folder as `LIST` reports it, before it is first selected.

@@ -12,6 +12,12 @@ workspace = true
 mail-imap.workspace = true
 mail-store.workspace = true
 mail-auth.workspace = true
+mail-parser.workspace = true
+rand.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing.workspace = true
 
 [dev-dependencies]
 mail-imap = { workspace = true, features = ["fake"] }
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "rt-multi-thread", "macros", "test-util", "net", "io-util"] }

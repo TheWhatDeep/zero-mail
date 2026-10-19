@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 use rusqlite::{Connection, TransactionBehavior};
 
 /// Every migration, in order. Never edit a released entry; append a new one.
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Applies every migration the database has not seen yet.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
@@ -41,6 +41,10 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+/// Version 2: Gmail messages join their account's thread by `X-GM-THRID` (SPEC_GAPS G36).
+const V2: &str = "CREATE INDEX messages_account_thrid ON messages(account_id, gm_thrid)
+    WHERE gm_thrid IS NOT NULL;";
 
 /// Version 1: the full section 4 data model.
 const V1: &str = r#"

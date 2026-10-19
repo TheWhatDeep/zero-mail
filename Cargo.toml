@@ -44,7 +44,9 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls1
 # OS trust store for certificate verification (v0.9, SPEC_GAPS G30).
 rustls-platform-verifier = { version = "0.7.1" }
 lettre = { version = "0.11.23", default-features = false }
-mail-parser = { version = "0.11.9" }
+# full_encoding: the multi-byte charsets (Shift_JIS, ISO-2022-JP, GB2312; T22), section 2
+# "charset conversion included".
+mail-parser = { version = "0.11.9", features = ["full_encoding"] }
 ammonia = { version = "4.2.4" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 keyring = { version = "4.2.0" }

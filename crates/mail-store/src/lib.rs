@@ -264,6 +264,101 @@ impl Store {
             .await
     }
 
+    /// An account's folders, by path.
+    pub async fn list_folders(&self, account_id: AccountId) -> Result<Vec<Folder>> {
+        self.read(move |conn| queries::list_folders(conn, account_id))
+            .await
+    }
+
+    pub async fn get_folder(&self, folder_id: FolderId) -> Result<Folder> {
+        self.read(move |conn| queries::get_folder(conn, folder_id))
+            .await
+    }
+
+    /// Makes the folder rows match a `LIST` result: new paths are added, vanished ones are
+    /// purged (section 12). Returns the account's folders.
+    pub async fn apply_folder_list(
+        &self,
+        account_id: AccountId,
+        listed: Vec<NewFolder>,
+    ) -> Result<Vec<Folder>> {
+        self.write(move |tx| queries::apply_folder_list(tx, account_id, &listed))
+            .await
+    }
+
+    /// Records a folder's first UIDVALIDITY; a folder that has one is left alone.
+    pub async fn set_uidvalidity(&self, folder_id: FolderId, uidvalidity: u32) -> Result<()> {
+        self.write(move |tx| queries::set_uidvalidity(tx, folder_id, uidvalidity))
+            .await
+    }
+
+    /// Every cached UID of a folder, ascending.
+    pub async fn cached_uids(&self, folder_id: FolderId) -> Result<Vec<u32>> {
+        self.read(move |conn| queries::cached_uids(conn, folder_id))
+            .await
+    }
+
+    /// Inserts a batch of synced headers in one transaction, assigning threads (SPEC_GAPS
+    /// G36). A UID already cached fails the whole batch.
+    pub async fn insert_synced(
+        &self,
+        folder_id: FolderId,
+        messages: Vec<NewMessage>,
+    ) -> Result<Vec<MessageId>> {
+        self.write(move |tx| queries::insert_synced(tx, folder_id, messages))
+            .await
+    }
+
+    /// Replaces flags by UID; returns how many rows changed.
+    pub async fn apply_flags(
+        &self,
+        folder_id: FolderId,
+        changes: Vec<(u32, Flags)>,
+    ) -> Result<usize> {
+        self.write(move |tx| queries::apply_flags(tx, folder_id, &changes))
+            .await
+    }
+
+    /// Records the end of a folder sync and recounts the folder (section 6, step 7).
+    pub async fn finish_folder_sync(
+        &self,
+        folder_id: FolderId,
+        state: FolderSyncState,
+    ) -> Result<()> {
+        self.write(move |tx| queries::finish_folder_sync(tx, folder_id, &state))
+            .await
+    }
+
+    /// Bodyless messages among the folder's newest `limit`.
+    pub async fn prefetch_candidates(
+        &self,
+        folder_id: FolderId,
+        limit: u32,
+    ) -> Result<Vec<PrefetchItem>> {
+        self.read(move |conn| queries::prefetch_candidates(conn, folder_id, limit))
+            .await
+    }
+
+    /// Stores a body, its `body_state` and the preview made from it.
+    pub async fn store_body(
+        &self,
+        message_id: MessageId,
+        body: Body,
+        state: BodyState,
+        preview: String,
+    ) -> Result<()> {
+        self.write(move |tx| queries::store_body(tx, message_id, &body, state, &preview))
+            .await
+    }
+
+    /// `PRAGMA integrity_check`; `Corrupt` when it fails. It runs on the writer: on a
+    /// pooled reader, FTS5's part of the check can report corruption while the writer is
+    /// changing the index, though searches on readers stay correct
+    /// (tests/fts_concurrency.rs).
+    pub async fn integrity_check(&self) -> Result<()> {
+        self.write(|tx| queries::integrity_check(tx)).await
+    }
+
     /// One page of a folder, newest first by `(date, id)`, after `cursor`.
     pub async fn folder_page(
         &self,
