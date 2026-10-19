@@ -252,3 +252,37 @@ Section 4 has one `accounts.pinned_cert_sha256` column, and section 5 says the u
 - The one pin applies to both the IMAP and the SMTP connection. The Stalwart test container uses one certificate for both, and so do most self-hosted servers.
 - Limit: a self-hosted pair whose IMAP and SMTP servers present two different self-signed certificates cannot be pinned. A second column would be a schema change.
 - `AppError` is fixed as `{ code, message, account_id? }`. For code `certificate`, `message` holds the presented leaf certificate's SHA-256 in lowercase hex (64 characters). That is what the UI shows under Review certificate and offers to pin.
+
+## G35. What `body_state` text and full mean — Resolved 2026-10-20
+Section 4 lists `none | text | full` and does not define them. The owner chose:
+- `none`: no body is cached.
+- `full`: every text/plain and text/html part of the message was fetched whole.
+- `text`: the parts were fetched, but at least one was cut at the 1 MB cap. Section 8 shows such a part as Message too large.
+
+## G36. `thread_id` before M9 — Resolved 2026-10-20
+`messages.thread_id` is `NOT NULL`, but threading arrives in M9. The owner chose:
+- Until M9, sync writes one thread per message.
+- On Gmail, messages that share `X-GM-THRID` share one thread. That is already M9's rule.
+- M9's union-find merges the single-message threads.
+
+## G37. The UIDVALIDITY toast needs an event — Resolved 2026-10-20: event `folder-reset` added
+Section 12 says a UIDVALIDITY change shows a toast, but no section 3 event carried it. The owner added the event `folder-reset {account_id, folder_id}`. It fires once, after the purge commits. The UI (M4) shows the toast. Section 3 was amended.
+
+## G38. T04 split between M3 and M4 — Resolved 2026-10-20
+- **M3:** the expunged row disappears locally.
+- **M4:** the open reading pane keeps the body and shows This message was deleted. The plain-text reader arrives in M4.
+
+## G39. Which messages the prefetcher skips — Resolved by interpretation (owner to ratify)
+Section 6, step 8 prefetches "text and HTML parts (each up to 1 MB)". Section 12 says a very large message gets "no body prefetch" but gives no size. M3 reads the two together:
+- The prefetcher takes the folder's newest 200 messages. The cap counts messages that already have a body.
+- It fetches each message's body text/plain and text/html parts whole.
+- A message whose body text part is over 1 MB is skipped. Its `body_state` stays `none`. Opening it later fetches a part capped at 1 MB, which gives `body_state` `text` (G35).
+- The message's total size does not matter. A small text part with a 20 MB attachment is prefetched; the attachment is never fetched (invariant 3).
+- HTML-only mail gets generated plain text, through `mail-parser`'s HTML-to-text, which is stored as `text_plain`. Previews and search then work (section 8).
+
+## G40. Small sync event and state details — Resolved by interpretation (owner to ratify)
+- **Throttle pause:** the 10-minute throttle pause shows as state `Backoff`, with `last_error` `throttled`. Section 6 has no separate paused state.
+- **Folder list changes:** `store-changed` with no `folder_id` (null) means the account's folder list changed. A folder was added or purged by `LIST`.
+- **Account removed:** an actor whose account row is gone stops.
+- **Missing credentials:** an account with no keychain password goes to `NeedsAttention`.
+- **Charsets:** `mail-parser`'s `full_encoding` feature is on, so Shift_JIS, ISO-2022-JP and GB2312 decode (section 2: "charset conversion included"; T22). It brings `encoding_rs` in as a transitive dependency. Nothing was added to the approved list.
