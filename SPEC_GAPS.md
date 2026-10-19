@@ -31,7 +31,7 @@ The owner chose an opaque look-alike: the design's glass tints are flattened ont
 ## G5. Dark theme tokens — Resolved 2026-10-19
 The owner chose to derive dark tokens from the zinc and accent ramps already in the design.
 - Message bodies stay on white.
-- The owner reviews the dark palette before M4 is tagged.
+- The owner reviews the dark palette before M4 is tagged. Reviewed and approved 2026-10-20 (M4 screenshots, light and dark).
 
 ## G6. Design elements outside the spec — Resolved 2026-10-19: spec wins
 Dropped:

@@ -391,3 +391,106 @@ None from spec v0.10. v0.10 records the owner's decisions G35–G38.
 
 ### Next
 M4 (UI shell).
+
+## M4: done, tagged `m4` (2026-10-20)
+
+Scope: UI shell, virtualized list, plain-text reader (through `mail-body`, G42), sidebar, status bar, and a minimal add-account form (G43). Done when:
+- 60 fps scroll on the 50,000-message fixture, plus the owner's own mail seen once (G41).
+- T04's reading-pane part passes (G38).
+- The startup budget is enforced (G44).
+
+Every check below passes locally on Windows 10. CI is green on Windows and in the Stalwart job ([run 39320230240](https://github.com/TheWhatDeep/zero-mail/actions/runs/39320230240)). The startup harness there enforces the startup budget and the 100-row cap. The owner approved the dark palette (G5), and on 2026-10-20 he added his Workspace account in the release build: real mail appeared, opened as plain text and scrolled smoothly (G41).
+
+### Built
+- **`mail-core::Core`, the facade `app` calls:**
+  - **Open path (section 12, G48):**
+    - A file SQLite rejects is moved aside as `mail.db.corrupt-<time>`, a fresh database is created, and `storage-warning` (`db_corrupt`) fires.
+    - A `quick_check` runs 10 s after start, on the writer. A failure writes a marker, and the next start moves the database aside.
+  - **Actors:** one actor per account at start. They are started, reconfigured and stopped by `account.add`, `account.update` (also the fix for NeedsAttention), `account.set_enabled` and `account.remove`.
+  - **Event pump:** `store-changed` is coalesced per (account, folder) into 100 ms windows, so a long sync updates the list at most 10 times a second. `account-state` (whose latest value `account.list` returns), `sync-progress` and `folder-reset` are forwarded as they come.
+  - **Commands:** `account.list` (G46), `account.resolve`, `account.test`, `account.add`, `account.update`, `account.remove`, `account.set_enabled`, `folder.list`, `folder.refresh`, `list.page` and `message.open`.
+    - `folder.list` returns the tree in section 9 order.
+    - `list.page` serves folder scope with keyset cursors. Its first page marks the folder open. Other scopes and `group_by_thread` return `unsupported` until M9.
+    - `message.open` returns the display model. An uncached body is fetched ahead of the queue.
+- **`mail-render`:** the `mail-body` plain-text document (G42). The text is HTML-escaped with nothing added and sits on the white canvas. The response carries the section 8 CSP header with a fresh 128-bit nonce. The only script is the nonce-carrying one that posts the content height.
+- **`app` (`src-tauri`):**
+  - The eleven commands, with `.` written as `_`.
+  - The `mail-body` protocol: the CSP is a response header (never a meta tag), plus `nosniff`, `no-referrer` and `no-store`.
+  - Events go to the UI.
+  - **Capabilities:** the capability file allows exactly these commands plus event listen (G49). The build generates one permission per command.
+  - **Perf hooks:** a runtime capability in perf mode only (G49).
+- **`mail-sync`:**
+  - The open-time fetch caps a text part at 1 MB, which gives `body_state` `text`.
+  - Each IDLE connection triggers one catch-up sync right after its SELECT. This closed a gap the test suite exposed (G49).
+- **`mail-store`:** `get_message`, `get_body`, `list_attachments` and `quick_check`. The perf fixture generator is `cargo run --release -p mail-store --example fixture -- <dir> 50000`.
+- **UI (Svelte 5, design 3a within G4, G6, G9 and G45):**
+  - **Typed IPC:** `ipc.ts` mirrors the commands built so far, the 20 error codes and the event payloads.
+  - **Shell:** sidebar on the left; the list and a 420 px reading pane in the main area, with banners above and the status bar below. First run shows only the add-account form.
+  - **Sidebar:** accounts with their folders. Special folders come first, the rest form a tree, and unread badges show. Add account sits at the bottom, and the account name opens its settings.
+  - **Message list:**
+    - An ARIA listbox (arrows, Home, End), virtualized with at most 100 DOM rows; 31 is the most seen.
+    - Rows load in keyset pages of 100. Pages more than 2 away from the window are dropped, and their cursors are kept.
+    - Sticky Today and Earlier headers with counts.
+    - Skeleton rows while a folder has never synced, and No messages when it is empty.
+    - Each row shows: an unread dot and bold text; the sender, or the recipients in Sent and Drafts; subject and preview; star and attachment marks; and a local-time date.
+  - **Reading pane:** the subject; the sender's name with the address beside it (section 13, item 10); To and Cc; the date. The plain text sits in the sandboxed frame without `allow-same-origin`, sized from its height messages. It shows Loading while the body is fetched and Message too large when the text was cut.
+  - **T04:** a message deleted on the server keeps its body, with This message was deleted.
+  - **Status bar:** one dot per account. A warning appears when an account has been in backoff for more than a minute, with its error.
+  - **Banners and toasts:** Offline; an account that needs attention, with Sign in again or Review certificate; storage warnings. A folder reset shows a 10 s toast.
+  - **Add-account form:** email, then resolve, then editable server fields and the app password. Test reports both halves. Save needs both to pass, and Save anyway appears after a failure. An untrusted certificate is shown with its fingerprint, grouped in fours, and can be trusted. In edit mode the password is optional and Remove account asks for confirmation.
+  - **Icons:** Phosphor path data (G10, G47).
+  - **Strings and tokens:** all strings are in `strings.ts`. Every value is in `tokens.css` (G50).
+- **Perf harness** (`tests/perf/startup.mjs`):
+  - Runs on a copy of the fixture: one discarded warm-up, then the median of 5 cold-app launches to painted inbox rows.
+  - `--scroll` runs a 300-frame scroll that measures frame rate, p95 and the most DOM rows.
+  - CI generates the fixture, enforces startup and DOM rows, and records the frame rate (G41).
+
+### Tests added (34 local; workspace total 149 Rust and 35 UI)
+- **`mail-core`:**
+  - The pump coalesces `store-changed` into 100 ms windows, on paused time. State events are forwarded and remembered.
+  - Folder tree order and depth. `list.page` request parsing.
+  - **Core on the fakes:** add, actor Idle, `account.list` flattened with its state, `folder.list` roles, two keyset pages, `message.open` through prefetch, and `mail-body` escaped, with the CSP and a 404 for a missing body. Unified scope returns `unsupported`. T04's Core half: the expunged message is `not_found`. Remove.
+  - A corrupt file is moved aside with a warning, and a rebuild marker is honoured.
+- **`mail-render`:** hostile text is escaped and exactly one nonce script is present; the CSP follows section 8; nonces are fresh.
+- **`mail-sync`:** an uncached message beyond the prefetch cap is fetched on open, and a 1.5 MB part is cut to exactly 1 MB with `body_state = text`. The QRESYNC test now checks one flag command per sync.
+- **`app`:** `mail-body` URLs parse in both platform forms and reject paths. Responses carry the CSP header.
+- **UI (17):**
+  - Row dates. Initials. The address beside the name. Recipients in Sent and Drafts. Sizes.
+  - Virtual layout: both headers, an unknown boundary, the 100-row cap, reveal-on-select.
+  - **Keyset page cache:** ordered loading, eviction, a direct reload, refresh in place, and a gap-free reset when mail arrives on top.
+  - **Reader (T04):** the deleted notice keeps the body; it re-asks only for its folder; it reloads when the body arrives.
+  - Protocol URL mapping; AppError checks.
+  - **Account form:** filling from a candidate, validation, the password sent once, the certificate to pin, both halves needed.
+- **Perf on this machine** (owner's Windows 10, 144 Hz display, release build, fixture):
+
+  | Measure | Result | Budget |
+  | --- | --- | --- |
+  | Startup, median of 5 | 732 ms (warm-up discarded: 2,214 ms) | 1,500 ms |
+  | Scroll frame rate | 137.6 fps | 60 fps |
+  | Scroll p95 frame time | 7.1 ms | |
+  | Most list rows in the DOM | 31 | 100 |
+
+- **Checks run here:**
+  - `npm --prefix ui run build`.
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --workspace --all-targets -- -D warnings`.
+  - `cargo test --workspace`: 149 passed, 5 ignored. The full suite ran twice with no flakes.
+  - `npm test`: 35 passed. `npm run lint`: 0 errors, 0 warnings.
+  - `node scripts/check-deps.mjs`.
+
+### Deviations
+None from spec v0.11. v0.11 records the owner's decisions G41–G48.
+
+### Gaps found
+- **G41–G48:** resolved by the owner (see above).
+- **G49 and G50** (interpretations, owner to ratify):
+  - G49: the event-listen permission, the perf-only capability, the data-dir override, folder-open through `list.page`, and the IDLE catch-up.
+  - G50: the new visual values.
+- **Size to watch:** the release exe is 16.2 MB, up from 7.8 MB at M0. The new network, TLS, MIME and charset dependencies account for the growth. The 15 MB budget is for the compressed installer, measured at M11.
+- **Not scheduled:**
+  - `folder.extend_window` (Load older; see M3).
+  - Logging setup (section 13, item 8: 5 rotating files of 2 MB). `tracing-appender` rotates by time, not size, so size-based rotation needs a small writer of our own. No milestone names it.
+- **Read state:** marking a message `\Seen` after 1.5 s needs `message.set_flags` and `ops`, which come in M6. Until then, opening a message does not mark it read.
+
+### Next
+Stop: the M5–M7 session starts next.
