@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.12 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.13 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -173,13 +173,14 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `message.open` | message_id | display model: headers, body kind, `mail-body` URL, attachment list, remote image state |
 | `message.set_flags`, `message.move`, `message.delete`, `message.archive`, `message.mark_all_read` | message_ids or folder_id, value | op_id for Undo |
 | `message.undo` | op_id | none |
-| `message.save_source` | message_id, path | none |
+| `message.save_source` | message_id, path? (none: the app shows a native Save dialog, SPEC_GAPS G54) | none |
 | `message.snooze`, `message.unsnooze` | message_ids, due_utc | op_id |
 | `message.mute`, `message.unmute` | thread_id | none |
 | `message.add_label`, `message.remove_label` | message_ids, folder_id | op_id |
 | `message.unsubscribe` | message_id | method used |
 | `message.print` | message_id or thread_id | none |
-| `attachment.open`, `attachment.save` | attachment_id, path? | none |
+| `attachment.open`, `attachment.save` | attachment_id, path? (none: native Save dialog, G54) | none |
+| `link.open` | url (`http`, `https` or `tel` only) | none; opens the system browser or handler (SPEC_GAPS G52) |
 | `images.allow_once`, `images.allow_sender` | message_id | none |
 | `compose.new`, `compose.reply`, `compose.reply_all`, `compose.forward` | message_id?, mode | draft_id and prefilled draft |
 | `draft.save`, `draft.discard`, `draft.add_attachment`, `draft.remove_attachment`, `draft.apply_template` | draft_id, content | none |
@@ -360,14 +361,14 @@ Raw mail is parsed in Rust, reduced to a small display model, and shown in a loc
 
 1. **Sanitize** with an `ammonia` allowlist. Keep structural, text, table, `img`, `a` and `style` elements with safe attributes. Remove `script`, `iframe`, `frame`, `object`, `embed`, `applet`, `form` and form controls, `base`, `meta`, `link`, `svg`, `math`, `audio`, `video`, every `on*` attribute, and `javascript:`, `vbscript:` and non-image `data:` URLs.
 2. **Rewrite URLs.** `cid:` becomes `mail-cid://<message>/<cid>`. Every `http(s)` image or CSS `url()` becomes `mail-remote://<encoded url>`. Each `a href` moves to `data-href` and `href` becomes `#`.
-3. **Serve** the result from the `mail-body://<message>?images=0|1` custom protocol with a `Content-Security-Policy` response header (not a meta tag): `default-src 'none'; style-src 'unsafe-inline'; img-src mail-cid:` plus `mail-remote:` only when `images=1`; `script-src 'nonce-<random per response>'`.
+3. **Serve** the result from the `mail-body://<message>?images=0|1&plain=0|1` custom protocol (`plain=1` is the per-message plain-text toggle, SPEC_GAPS G53) with a `Content-Security-Policy` response header (not a meta tag): `default-src 'none'; style-src 'unsafe-inline'; img-src mail-cid:` plus `mail-remote:` only when `images=1`; `script-src 'nonce-<random per response>'`.
 4. **Display** in `<iframe sandbox="allow-scripts" src="mail-body://...">` without `allow-same-origin`. The only script is ours, carrying the nonce. It handles link clicks and posts the content height to the parent for auto-sizing. The body always sits on a white background, in light and dark themes. No color inversion.
 
 Because remote URLs are always rewritten and the CSP decides whether they load, blocking and allowing are one switch: `images=0` or `images=1`.
 
 **Remote images.** Blocked by default with a banner: Load images, or Always load from this sender (stored in `remote_image_allow`). When allowed, Core fetches through the `mail-remote` proxy with no cookies, no referrer, a generic user agent, a 10 s timeout, a 5 MB cap, `image/*` responses only, and at most 4 concurrent requests per message.
 
-**Links.** The iframe script posts the clicked `href` to the parent. The parent allows only `http`, `https`, `mailto` and `tel`. `mailto` opens compose; the rest open in the system browser, never in-app. If the visible link text looks like a URL whose host differs from the real `href` host, show a confirmation with both. Hovering shows the real target in the status bar.
+**Links.** The iframe script posts the clicked `href` to the parent. The parent allows only `http`, `https`, `mailto` and `tel`. `mailto` opens compose; the rest open in the system browser through `link.open` (SPEC_GAPS G52), never in-app. If the visible link text looks like a URL whose host differs from the real `href` host, show a confirmation with both. Hovering shows the real target in the status bar.
 
 **Plain text.** Linkify `http(s)` and `mailto` only. Collapse quoted blocks deeper than level 1 behind a toggle. Honor `format=flowed`.
 
@@ -576,7 +577,7 @@ Stalwart does not speak Gmail's dialect, so tests that need `X-GM-EXT-1` (T11 se
 | T16 | Send | Attachment over the server's SIZE limit | Blocked before queueing with a clear message. |
 | T17 | Send | Reply-all on a message that includes the user's own alias | Own addresses excluded, no duplicates, In-Reply-To and References correct. |
 | T18 | Send | Type a draft, wait 30 s, open Drafts on another client, edit again | One draft present at all times; old UID removed after each upload. |
-| T19 | Render | XSS corpus: scripts, event handlers, `javascript:` URLs, SVG payloads, CSS `@import`, meta refresh, forms, `base` | No script runs; harness records zero outbound requests. |
+| T19 | Render | XSS corpus: scripts, event handlers, `javascript:` URLs, SVG payloads, CSS `@import`, meta refresh, forms, `base` | No script runs; harness records zero outbound requests (Rust corpus tests plus a WebView2 DevTools harness, SPEC_GAPS G56). |
 | T20 | Render | Message with a remote image and a tracking pixel | Nothing fetched until Load images; then fetched via the proxy without cookies or referrer; Always load persists. |
 | T21 | Render | Link text `paypal.com` pointing at another host | Confirmation shows both; cancelling keeps the user in the app. |
 | T22 | Render | Mail in UTF-8, ISO-8859-1, Windows-1252, ISO-2022-JP, GB2312, Shift_JIS and a bogus charset label | All readable or best-effort with no panic. |
@@ -660,7 +661,7 @@ Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mai
 | M2 | `imap`, `secrets`, `auth` (password), account CRUD, autoconfig, SMTP connection test (G32) | Add an account against the container; `LIST` works; T09 at the login level (G33) |
 | M3 | `sync`: actors, folder order, folder procedure, IDLE, backoff | T01, T02, T04 (row part, G38), T05 (list part), T07, T08, T09 with actors (G33) |
 | M4 | UI shell, virtualized list, plain-text reader (via `mail-body`, G42), sidebar, status bar, minimal add-account form (G43) | 60 fps scroll on the 50,000-message fixture and the owner's own mail seen once (G41); T04 reading-pane part (G38); startup budget enforced (G44) |
-| M5 | `render`: parser, sanitizer, protocols, attachments; logging and `log.open` (SPEC_GAPS G51) | T19 to T24 |
+| M5 | `render`: parser, sanitizer, protocols, attachments; logging and `log.open` (SPEC_GAPS G51); `link.open` and `message.save_source` (G52, G54) | T19 to T24 |
 | M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks; `folder.extend_window` (G51) | T03, T06, T25 to T28 |
 | M7 | `smtp`, `outbox`, compose window, drafts, identities, contacts | T10 to T18 |
 | M8 | OAuth: Google XOAUTH2 end to end | T31, T32 |
@@ -762,6 +763,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.13 | 2026-10-20 | Owner decisions (SPEC_GAPS G52 to G54, G56): command `link.open`; `plain=1` on `mail-body`; native Save dialogs from Rust, `message.save_source` path optional and built in M5; T19 harness. |
 | v0.12 | 2026-10-20 | Owner ratified G20 to G22, G34, G39, G40, G49 and G50. Logging and `log.open` scheduled in M5, `folder.extend_window` in M6 (SPEC_GAPS G51). |
 | v0.11 | 2026-10-20 | Owner decisions (SPEC_GAPS G41 to G48): M4 done-when (fixture at 60 fps and the owner's own mail once); plain text through `mail-body` from M4; minimal add-account form in M4; startup budget is app cold, OS warm; later-milestone UI hidden until built; `account.list` added; Phosphor icon source; background integrity check. |
 | v0.10 | 2026-10-20 | Owner decisions (SPEC_GAPS G35 to G38): `body_state` meanings; one thread per message until M9 (Gmail by X-GM-THRID); event `folder-reset` for the UIDVALIDITY toast; T04 split between M3 (row) and M4 (reading pane). |

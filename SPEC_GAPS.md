@@ -355,3 +355,42 @@ Every value lives in `tokens.css`. New colors reuse existing palette values thro
 ## G51. Two features no milestone named — Resolved 2026-10-20: the owner delegated the choice
 - **Load older:** `folder.extend_window` adds 90 days per click (sections 3 and 12). It goes in **M6**, next to the other folder commands and the folder `ops`. Sync already keeps older cached rows, so the command only has to fetch the extra window and add a Load older control at the end of the list.
 - **Logging:** section 13.8 asks for rotating log files (5 files of 2 MB, level info), with no message content or credentials at any level. It also asks for a debug switch with IMAP and SMTP traces that redact `AUTH`, `LOGIN` and message literals. `log.open` opens the folder. This goes in **M5**, early, so later milestones have logs to debug with. `tracing-appender` rotates by time, not size, so M5 adds a small size-rotating writer of our own on `tracing-subscriber`. No new crate. The UI switch for the debug setting arrives with Settings in M10.
+
+## G52. How a clicked link reaches the system browser — Resolved 2026-10-20: option (a), `link.open`
+Section 8 says `http`, `https` and `tel` links open in the system browser, never in-app. Section 3 has no command for it, and section 13.3 lets the page call only the app's own commands, so the page may not use the opener plugin itself.
+
+Options:
+- (a) **Recommended:** add the command `link.open {url}`. Core accepts `http`, `https` and `tel` only, and the app opens the URL through the official opener plugin from Rust. The capability file stays commands-only.
+- (b) Grant the page the opener plugin's `allow-open-url` permission, scoped to those schemes. This adds a plugin permission to the capability file.
+
+## G53. The per-message plain-text toggle on `mail-body` — Resolved 2026-10-20: option (a), `plain=1`
+Section 8 has a per-message toggle from HTML to plain text, but the `mail-body` URL carries only `images=0|1`.
+
+Options:
+- (a) **Recommended:** add a `plain=1` query parameter: `mail-body://<message>?images=0|1&plain=0|1`. `message.open` returns the HTML URL; the toggle swaps the parameter.
+- (b) No toggle until Settings (M10).
+
+## G54. Save dialogs, and `message.save_source` in M5 — Resolved 2026-10-20: option (a)
+`attachment.save` takes `path?` and `message.save_source` takes `path`. A path comes from a native Save dialog, but section 13.3 does not let the page call the dialog plugin. Section 12 also asks for Save source (`.eml`) on Could not display this message and a download option on Message too large, which are M5's render cases.
+
+Options:
+- (a) **Recommended:** with no path, the app opens the native Save dialog from Rust (official dialog plugin), with the sanitized file name as the default. `message.save_source`'s `path` becomes optional like `attachment.save`'s. M5 builds `message.save_source` for the two section 12 cases.
+- (b) Grant the page the dialog plugin's `allow-save` permission.
+
+## G55. Attachment file names on Windows — Resolved by interpretation (owner to ratify)
+Section 8 strips path separators and control characters, prefixes Windows reserved names and caps the name at 200 characters. On Windows `:` also separates a drive or an NTFS stream, and `* ? " < > |` cannot be in a file name, so a save would fail or write a hidden stream. M5 strips those seven characters as well, on every OS. A name that ends up empty, `.` or `..` becomes `attachment`.
+
+## G56. How T19 counts outbound requests — Resolved 2026-10-20: option (a), Rust tests and a WebView2 harness
+T19 passes when "no script runs; harness records zero outbound requests". No harness watches the webview's network yet.
+
+Options:
+- (a) **Recommended:** both: Rust tests run the XSS corpus through the sanitizer and URL rewriting and check that nothing fetchable or executable survives; and a Windows CI harness launches the release app on a corpus database with WebView2's DevTools protocol, opens every corpus message, and fails on any network request outside the app's own protocols. Every corpus payload that would run tries to fetch a beacon URL, so zero requests also proves no script ran.
+- (b) The Rust tests only.
+
+## G57. Small M5 details — Resolved by interpretation (owner to ratify)
+- **Remote-image limit:** the `mail-remote` proxy allows at most 4 requests at a time in total. That meets "at most 4 per message", and the URL stays `mail-remote://<encoded url>` as section 8 has it.
+- **Images switch:** `mail-body` honours `images=1` only for a message the user allowed (Load images for this session, or a sender in `remote_image_allow`). Otherwise it answers as `images=0`.
+- **`mailto` links before M7:** compose arrives in M7 (G45), so until then a `mailto` click does nothing.
+- **Link host check:** the visible text "looks like a URL" when it is a bare host, a host with a path, or an `http(s)` URL. The hosts differ when they are not equal after lower-casing and removing one leading `www.`.
+- **Where files go:** logs in `<app data>/logs` (`zeromail.log` plus 4 older files of 2 MB); the attachment cache in `<app data>/attachments` (LRU, 500 MB); opened attachments in `<app data>/tmp/<random>/`, which is emptied at quit and at the next start.
+- **Debug traces:** the switch is the setting `debug_logging` (default off), read at start. The UI for it comes in M10 (G51). IMAP traces redact `LOGIN` and `AUTHENTICATE` arguments, SASL responses, every literal and every quoted string in `FETCH` responses. SMTP traces redact `AUTH` lines and everything between `DATA` and the final `.`.
