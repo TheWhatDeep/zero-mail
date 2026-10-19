@@ -494,3 +494,46 @@ None from spec v0.11. v0.11 records the owner's decisions G41–G48.
 
 ### Next
 Stop: the M5–M7 session starts next.
+
+## M5: done, tagged `m5` (2026-10-20)
+
+Scope: `render` (parser, sanitizer, protocols, attachments), logging and `log.open` (G51), and `link.open` and `message.save_source` (G52, G54). Done when: T19 to T24.
+
+Every check below passes locally on Windows 10. CI: pending at commit time; recorded below when green.
+
+### Built
+- **`render` (`mail-render`), the HTML pipeline of section 8, every step at every render (invariant 4):**
+  - **Sanitize:** an `ammonia` allowlist of structural, text, table, `img`, `a` and `style` elements with presentational attributes, `style` and `class`. Removed with their content: `script`, `iframe`, `frame`, `object`, `embed`, `applet`, `svg`, `math`, `audio`, `video`, form controls, `noscript`, `template` and `title`. Removed, content kept: `form` and anything not allowed. `base`, `meta` and `link` disappear. Every `on*` attribute, `id` and `name` go. Only `http`, `https`, `mailto` and `tel` links survive; images keep `cid:`, `http(s)` and non-SVG `data:image/` (which the CSP never loads).
+  - **Rewrite URLs:** `cid:` becomes `mail-cid://<message>/<cid>`; every `http(s)` image, `background` attribute and CSS `url()` becomes `mail-remote://<encoded url>`; each `a href` moves to `data-href` with `href="#"`. CSS in `style` attributes and `<style>` elements: `@import` rules are removed, URL strings in `image-set()` and `@font-face` are rewritten, CSS escapes that spell names (`\75 rl(`, `@\69mport`) are resolved first, and `expression()`, `behavior` and `-moz-binding` are broken.
+  - **Serve:** `mail-body://<message>?images=0|1&plain=0|1` with the section 8 CSP as a response header and a fresh nonce. `images=1` counts only for a message the user allowed (G57). URLs are written in the platform's form (`http://mail-cid.localhost/...` on Windows).
+  - **The frame's one script** posts the content height, link clicks (target and visible text) and the hovered link to the parent. It prevents every navigation and form submit inside the frame.
+  - **Plain text:** escaped, `http(s)` and `mailto` linkified, quoted blocks deeper than level 1 collapsed behind a `<details>` toggle.
+  - **Remote-image proxy:** no cookies, no referrer, a generic user agent, a 10 s timeout, a 5 MB cap, `image/*` only, 4 requests at a time (G57).
+  - **Attachments:** names decoded (RFC 2047 here, RFC 2231 when BODYSTRUCTURE is read), sanitized for saving (G55), the executable-type check, the on-disk byte cache (LRU, 500 MB, keyed by account, folder, UIDVALIDITY, UID and part), and the temp folders for Open (a random subfolder per file, deleted at quit and at the next start).
+- **Parser (`imap`, `sync`):** `format=flowed` (with `delsp`) is undone when a text part is decoded; BODYSTRUCTURE carries `format` and `delsp` and decodes RFC 2231 file names. The actor fetches one part, transfer-decoded, or the raw source on demand at user priority and answers the caller; offline, the caller gets `network`. A body the server refuses permanently becomes Could not display this message.
+- **Logging (G51, G57):** `tracing` to `<app data>/logs`, five files of 2 MB rotated by our own writer, level info. The setting `debug_logging` adds the IMAP and SMTP traces, which redact `LOGIN` and `AUTHENTICATE` arguments, SASL exchanges, every IMAP literal, quoted strings in `FETCH` responses, `AUTH` lines and the message between `DATA` and `.`. A connection traces only when the switch was on when it opened.
+- **`mail-core`:** `message.open` returns `html`, `plain`, `loading` or `unreadable`, plus `truncated`, `has_html`, remote image state and attachments with ids and the executable flag. New: `images.allow_once` (this session), `images.allow_sender` (`remote_image_allow`), `attachment.open`, `attachment.save`, `message.save_source`, `link.open` (only `http`, `https`, `tel`) and `log.open`; the `mail-cid` and `mail-remote` protocol answers. Removing an account also drops its cached attachment files.
+- **`app`:** the seven commands, the `mail-cid` and `mail-remote` protocols, logging at start. The opener and dialog plugins are used from Rust only: Save as with no path opens the native dialog with the sanitized name, and closing it is `cancelled` (G52, G54). The capability file lists the commands only.
+- **UI:**
+  - **Reading pane:** the HTML or plain body in the sandboxed frame; a Plain text / Formatted toggle when there is HTML; the remote-images notice with Load images and Always load from this sender; Message too large and Could not display this message, both with Save source (.eml).
+  - **Links (T21):** only `http`, `https`, `mailto` and `tel`. When the visible text names another host, an inline confirmation shows both hosts; Cancel keeps the user in the app. `mailto` does nothing until compose (M7, G57).
+  - **Attachments:** name, size, Open and Save as. Executable types ask first.
+  - **Status bar:** the hovered link's real target; the backoff warning opens the log folder.
+- **T19 harness (G56):** `tests/render/xss-harness.mjs` with the `xss_fixture` example. CI's Windows perf job runs it on the release build.
+
+### Tests added (35 local; workspace total 179 Rust (6 container tests ignored locally) and 40 UI)
+- **`mail-render`:** sanitizer structure and URL rewriting, style blocks, the link mark, CSS rewriting (escapes, imports, strings, legacy), plain text (linkify, quote collapse), the CSP, nonces, only images served as images, file names (G55), executable types, encoded names, the LRU cache, temp folders, the proxy (no cookie or referrer across two requests, image only, http only, the size cap).
+- **T19 (Rust half):** 44 corpus cases, each in both URL forms: no forbidden element or attribute, no event handler, no `javascript:`, `vbscript:`, `@import`, `expression(` or foreign URL left in markup or CSS, and exactly one script in the served document.
+- **T19 (webview half):** on the release build here, 44 corpus messages opened through keyboard navigation with the pointer moved over each body, 44 `mail-body` loads seen across the page and its frames, 7 `mail-remote` loads stopped by the CSP, and zero requests to any other host. Any attempt on the beacon host, even one the CSP stopped, would fail the run.
+- **`mail-core` on the fakes:** T20 (nothing fetched before consent, `images=1` ignored without it, the proxy sends no cookie or referrer, allow-once is per session, Always load persists across a restart and matches the sender case-insensitively); T22 (UTF-8, ISO-8859-1, Windows-1252, ISO-2022-JP body and subject, GB2312, Shift_JIS, a bogus label in UTF-8 and in 8-bit, and broken MIME); T23 (the 20 MB part never prefetched, fetched once on Save and then from the cache, `../x` and `CON.txt` saved as `..x` and `_CON.txt`, the executable flag, Open into a random temp folder, temp deleted at quit); T24 (served through `mail-cid`, no `data:` URI, non-image and unknown cids refused); the plain toggle, format=flowed and linkify end to end; Could not display and Save source, and `network` offline; `link.open`'s scheme check.
+- **Stalwart:** an APPENDed multipart message through the real transport: sanitized HTML, the cid image, the base64 attachment saved, and Save source.
+- **`mail-imap`:** multipart parts in the fake, `format=flowed` and RFC 2231 in BODYSTRUCTURE, IMAP trace redaction. **`mail-smtp`:** SMTP trace redaction. **`mail-sync`:** format=flowed, transfer decoding. **`mail-core`:** log rotation keeps 5 files of at most 2 MB; the debug filter adds only the traces.
+- **UI:** link decisions (T21), host parsing and the body URL toggle.
+
+### Deviations
+None from spec v0.13. v0.13 records the owner's decisions G52–G54 and G56.
+
+### Gaps found
+- **G52–G54, G56:** resolved by the owner (see above).
+- **G55 and G57** (interpretations, owner to ratify): Windows-safe file names; the proxy's overall limit of 4; `images=1` only with consent; `mailto` inert until M7; the link host rule; where logs, cache and temp files live; the debug setting and what the traces redact.
+- **For later (not in M5's scope):** the proxy fetches whatever host an allowed image names, as a browser would, including the local network; blocking private addresses would be a spec change. Read state after 1.5 s needs `message.set_flags` (M6).

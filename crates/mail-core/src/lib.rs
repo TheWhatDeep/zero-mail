@@ -8,6 +8,7 @@
 pub mod accounts;
 mod core;
 mod error;
+pub mod logging;
 pub mod views;
 
 pub use crate::core::{
@@ -16,7 +17,7 @@ pub use crate::core::{
 };
 pub use mail_auth::HttpClient;
 pub use mail_imap::ImapClient;
-pub use mail_render::BodyResponse;
+pub use mail_render::{empty_response, BodyResponse};
 pub use mail_secrets::Keychain;
 pub use mail_smtp::SmtpClient;
 

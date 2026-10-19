@@ -4,6 +4,7 @@
 /ui/dist/
 /src-tauri/gen/schemas/
 /tests/perf/results/
+/tests/render/results/
 /tests/fixtures/generated/
 *.db
 *.db-wal

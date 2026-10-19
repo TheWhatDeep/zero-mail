@@ -180,8 +180,15 @@ fn leaf(
     let ct_param = |name: &str| param(&common.ty.params, name);
     let disposition = common.disposition.as_ref();
     let filename = disposition
-        .and_then(|d| param(&d.params, "filename").or_else(|| param(&d.params, "filename*")))
-        .or_else(|| ct_param("name"));
+        .and_then(|d| {
+            param(&d.params, "filename")
+                .or_else(|| param(&d.params, "filename*").map(|v| rfc2231(&v)))
+        })
+        .or_else(|| ct_param("name"))
+        .or_else(|| ct_param("name*").map(|v| rfc2231(&v)));
+    let is = |name: &str, value: &str| {
+        ct_param(name).is_some_and(|v| v.trim().eq_ignore_ascii_case(value))
+    };
     BodyPart {
         part_id,
         mime,
@@ -196,7 +203,43 @@ fn leaf(
         disposition: disposition.map(|d| d.ty.to_ascii_lowercase()),
         filename,
         size: single.map_or(0, |s| u64::from(s.octets)),
+        flowed: is("format", "flowed"),
+        delsp: is("delsp", "yes"),
         children: Vec::new(),
+    }
+}
+
+/// An RFC 2231 extended value, `charset'language'percent-encoded`. UTF-8 and US-ASCII are
+/// decoded; any other charset is read as Latin-1, byte for byte. A value without the two
+/// quotes is returned as it is.
+pub(crate) fn rfc2231(value: &str) -> String {
+    let mut parts = value.splitn(3, '\'');
+    let (Some(charset), Some(_lang), Some(encoded)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return value.to_string();
+    };
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(&h), Some(&l)) if hex(h).is_some() && hex(l).is_some() => {
+                let v = hex(h).unwrap_or(0) * 16 + hex(l).unwrap_or(0);
+                out.push(u8::try_from(v).unwrap_or(b'?'));
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    let utf8 = charset.eq_ignore_ascii_case("utf-8") || charset.eq_ignore_ascii_case("us-ascii");
+    if utf8 {
+        String::from_utf8_lossy(&out).into_owned()
+    } else {
+        out.iter().map(|b| char::from(*b)).collect()
     }
 }
 
@@ -310,5 +353,18 @@ mod tests {
         assert_eq!(leaves[2].disposition.as_deref(), Some("inline"));
         assert_eq!(leaves[3].filename.as_deref(), Some("r.pdf"));
         assert_eq!(leaves[3].size, 4000);
+        assert!(!leaves[0].flowed);
+    }
+
+    #[test]
+    fn bodystructure_flowed_text_and_extended_filenames() {
+        let part = parse_bodystructure(
+            b"* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\" \"FORMAT\" \"flowed\" \"DELSP\" \"yes\") NIL NIL \"7BIT\" 42 3 NIL NIL NIL NIL))\r\n",
+        );
+        assert!(part.flowed && part.delsp);
+        assert_eq!(rfc2231("UTF-8''Caf%C3%A9%20menu.pdf"), "Café menu.pdf");
+        assert_eq!(rfc2231("iso-8859-1'en'%E9t%E9.txt"), "été.txt");
+        assert_eq!(rfc2231("plain.txt"), "plain.txt");
+        assert_eq!(rfc2231("utf-8''bad%zz"), "bad%zz");
     }
 }

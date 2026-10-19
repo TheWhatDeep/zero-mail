@@ -2,7 +2,7 @@
 //! reader's display model. Plain data, serialized for IPC; no secrets, no SQL.
 
 use mail_store::{
-    Address, BodyState, Cursor, Flags, Folder, ListRow, MessageRecord, NewAttachment, SpecialUse,
+    Address, AttachmentRecord, BodyState, Cursor, Flags, Folder, ListRow, MessageRecord, SpecialUse,
 };
 use serde::{Deserialize, Serialize};
 
@@ -230,21 +230,44 @@ pub struct PageView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyKind {
-    /// Plain text from `mail-body` (M4; HTML arrives in M5).
+    /// Sanitized HTML from `mail-body` (section 8).
+    Html,
+    /// Plain text from `mail-body`.
     Plain,
-    /// Cut at the 1 MB cap (section 12, Very large message).
-    PlainTruncated,
     /// Not cached yet; it is being fetched, and `store-changed` follows.
     Loading,
+    /// The body could not be fetched or read: Could not display this message, with Save
+    /// source (section 12).
+    Unreadable,
+}
+
+/// Remote images in the HTML body (section 8): none, blocked (the banner shows), or
+/// allowed for this message or its sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteImages {
+    None,
+    Blocked,
+    Allowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AttachmentView {
-    pub part_id: String,
+    pub id: i64,
+    /// The name as the sender meant it (encoded words decoded).
     pub filename: String,
     pub mime: String,
     pub size: u64,
-    pub is_inline: bool,
+    /// Open asks first: an executable type (section 8).
+    pub executable: bool,
+}
+
+/// What `message.open` knows about the body beyond the header row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyInfo {
+    pub has_html: bool,
+    pub remote_images: RemoteImages,
+    pub unreadable: bool,
 }
 
 /// `message.open`'s display model (section 3).
@@ -262,14 +285,23 @@ pub struct MessageView {
     pub unread: bool,
     pub flagged: bool,
     pub body_kind: BodyKind,
-    /// `mail-body://localhost/<id>?images=0`. The UI maps it to the platform's form.
+    /// A text part was cut at 1 MB: Message too large, with Save source (section 12).
+    pub truncated: bool,
+    /// The body has an HTML part, so the plain-text toggle applies (SPEC_GAPS G53).
+    pub has_html: bool,
+    /// `mail-body://localhost/<id>?images=0|1`. The UI maps it to the platform's form and
+    /// adds `&plain=1` for the toggle.
     pub body_url: String,
     pub attachments: Vec<AttachmentView>,
-    /// Remote images arrive with the HTML pipeline in M5; plain text has none.
-    pub remote_images: &'static str,
+    pub remote_images: RemoteImages,
 }
 
-pub fn message_view(m: &MessageRecord, attachments: &[NewAttachment]) -> MessageView {
+pub fn message_view(
+    m: &MessageRecord,
+    attachments: &[AttachmentRecord],
+    body: BodyInfo,
+) -> MessageView {
+    let images = u8::from(body.remote_images == RemoteImages::Allowed);
     MessageView {
         id: m.id,
         account_id: m.account_id,
@@ -282,24 +314,30 @@ pub fn message_view(m: &MessageRecord, attachments: &[NewAttachment]) -> Message
         date_utc: m.date_utc,
         unread: !m.flags.contains(Flags::SEEN),
         flagged: m.flags.contains(Flags::FLAGGED),
-        body_kind: match m.body_state {
-            BodyState::Full => BodyKind::Plain,
-            BodyState::Text => BodyKind::PlainTruncated,
-            BodyState::None => BodyKind::Loading,
+        body_kind: match (m.body_state, body.unreadable, body.has_html) {
+            (BodyState::None, true, _) => BodyKind::Unreadable,
+            (BodyState::None, false, _) => BodyKind::Loading,
+            (_, _, true) => BodyKind::Html,
+            (_, _, false) => BodyKind::Plain,
         },
-        body_url: format!("mail-body://localhost/{}?images=0", m.id),
+        truncated: m.body_state == BodyState::Text,
+        has_html: body.has_html,
+        body_url: format!("mail-body://localhost/{}?images={images}", m.id),
         attachments: attachments
             .iter()
-            .filter(|a| !a.is_inline)
-            .map(|a| AttachmentView {
-                part_id: a.part_id.clone(),
-                filename: a.filename.clone(),
-                mime: a.mime.clone(),
-                size: a.size,
-                is_inline: a.is_inline,
+            .filter(|a| !a.attachment.is_inline)
+            .map(|a| {
+                let name = mail_render::display_name(&a.attachment.filename);
+                AttachmentView {
+                    id: a.id,
+                    executable: mail_render::is_executable(&name),
+                    filename: name,
+                    mime: a.attachment.mime.clone(),
+                    size: a.attachment.size,
+                }
             })
             .collect(),
-        remote_images: "none",
+        remote_images: body.remote_images,
     }
 }
 

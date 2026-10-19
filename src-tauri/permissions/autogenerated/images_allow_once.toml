@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-images-allow-once"
+description = "Enables the images_allow_once command without any pre-configured scope."
+commands.allow = ["images_allow_once"]
+
+[[permission]]
+identifier = "deny-images-allow-once"
+description = "Denies the images_allow_once command without any pre-configured scope."
+commands.deny = ["images_allow_once"]

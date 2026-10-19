@@ -114,6 +114,17 @@ impl FakeMessage {
         self
     }
 
+    /// A raw RFC 5322 message whose BODYSTRUCTURE is read from its own MIME headers, so
+    /// multipart bodies, attachments and inline images can be fetched part by part.
+    pub fn mime(raw: impl Into<Vec<u8>>, internal_date: i64) -> Self {
+        let raw = raw.into();
+        let body = structure(&raw, None);
+        Self {
+            body,
+            ..Self::new(raw, internal_date)
+        }
+    }
+
     pub fn with_gmail_ids(mut self, msgid: u64, thrid: u64) -> Self {
         self.gm_msgid = Some(msgid);
         self.gm_thrid = Some(thrid);
@@ -671,7 +682,7 @@ impl FakeTransport {
             "HEADER" => head,
             "TEXT" => body,
             "1" if m.msg.body.children.is_empty() => body,
-            _ => return Err(ImapError::No("no such part".into())),
+            id => part_bytes(&m.msg.raw, id).ok_or_else(|| ImapError::No("no such part".into()))?,
         };
         let limit = max_bytes.map_or(bytes.len(), |max| bytes.len().min(max as usize));
         Ok(bytes[..limit].to_vec())
@@ -994,6 +1005,186 @@ fn split_header(raw: &[u8]) -> (&[u8], &[u8]) {
         }
     }
     (raw, &[])
+}
+
+/// The unfolded value of the first header named `name` in a header block, as written.
+fn header_raw(head: &[u8], name: &str) -> Option<String> {
+    let head = String::from_utf8_lossy(head);
+    let mut value: Option<String> = None;
+    for line in head.split("\r\n").flat_map(|l| l.split('\n')) {
+        match value.as_mut() {
+            Some(v) if line.starts_with([' ', '\t']) => v.push_str(line),
+            Some(_) => break,
+            None => {
+                if let Some((key, rest)) = line.split_once(':') {
+                    if key.trim().eq_ignore_ascii_case(name) {
+                        value = Some(rest.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    value
+}
+
+/// A header value split at `;` outside quotes: the main value, lowercased, and its
+/// parameters with lowercased names and unquoted values.
+fn header_params(value: &str) -> (String, Vec<(String, String)>) {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in value.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            ';' if !quoted => pieces.push(std::mem::take(&mut current)),
+            c => current.push(c),
+        }
+    }
+    pieces.push(current);
+    let mut iter = pieces.into_iter();
+    let main = iter.next().unwrap_or_default().trim().to_lowercase();
+    let params = iter
+        .filter_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            Some((
+                k.trim().to_lowercase(),
+                v.trim().trim_matches('"').to_string(),
+            ))
+        })
+        .collect();
+    (main, params)
+}
+
+/// A MIME entity's [`BodyPart`] tree, as a server would describe it in BODYSTRUCTURE.
+/// `part_id` is `None` for the message root.
+fn structure(entity: &[u8], part_id: Option<String>) -> BodyPart {
+    let (head, body) = split_header(entity);
+    let content_type = header_raw(head, "content-type").unwrap_or_else(|| "text/plain".into());
+    let (mime, params) = header_params(&content_type);
+    let param = |name: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    let (disposition, dparams) = header_raw(head, "content-disposition")
+        .map(|d| header_params(&d))
+        .map_or((None, Vec::new()), |(d, p)| (Some(d), p));
+    let dparam = |name: &str| {
+        dparams
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    };
+    let filename = dparam("filename")
+        .or_else(|| dparam("filename*").map(|v| crate::parse::rfc2231(&v)))
+        .or_else(|| param("name"));
+    let id_of = |i: usize| match &part_id {
+        None => (i + 1).to_string(),
+        Some(p) => format!("{p}.{}", i + 1),
+    };
+    if let (true, Some(boundary)) = (mime.starts_with("multipart/"), param("boundary")) {
+        let children = multipart_children(body, &boundary)
+            .iter()
+            .enumerate()
+            .map(|(i, child)| structure(child, Some(id_of(i))))
+            .collect();
+        return BodyPart {
+            part_id: part_id.unwrap_or_default(),
+            mime,
+            charset: None,
+            encoding: None,
+            content_id: None,
+            disposition: None,
+            filename: None,
+            size: 0,
+            flowed: false,
+            delsp: false,
+            children,
+        };
+    }
+    let is = |name: &str, value: &str| param(name).is_some_and(|v| v.eq_ignore_ascii_case(value));
+    BodyPart {
+        part_id: part_id.unwrap_or_else(|| "1".into()),
+        mime,
+        charset: param("charset"),
+        encoding: Some(
+            header_raw(head, "content-transfer-encoding")
+                .unwrap_or_else(|| "7bit".into())
+                .to_lowercase(),
+        ),
+        content_id: header_raw(head, "content-id").map(|id| {
+            id.trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string()
+        }),
+        disposition,
+        filename,
+        size: body.len() as u64,
+        flowed: is("format", "flowed"),
+        delsp: is("delsp", "yes"),
+        children: Vec::new(),
+    }
+}
+
+/// The entities between `--boundary` lines, without the CRLF before each delimiter.
+fn multipart_children<'a>(body: &'a [u8], boundary: &str) -> Vec<&'a [u8]> {
+    let delimiter = format!("--{boundary}");
+    let d = delimiter.as_bytes();
+    let mut starts = Vec::new();
+    let mut i = 0;
+    while i + d.len() <= body.len() {
+        let at_line_start = i == 0 || body[i - 1] == b'\n';
+        if at_line_start && &body[i..i + d.len()] == d {
+            starts.push(i);
+            i += d.len();
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = Vec::new();
+    for w in starts.windows(2) {
+        let (from, to) = (w[0], w[1]);
+        let mut begin = from + d.len();
+        // Skip the rest of the delimiter line.
+        while begin < to && body[begin] != b'\n' {
+            begin += 1;
+        }
+        begin = (begin + 1).min(to);
+        let mut end = to;
+        if end > begin && body[end - 1] == b'\n' {
+            end -= 1;
+        }
+        if end > begin && body[end - 1] == b'\r' {
+            end -= 1;
+        }
+        out.push(&body[begin..end]);
+    }
+    out
+}
+
+/// The body bytes of part `id` (for example `2` or `1.2`), still transfer-encoded.
+fn part_bytes<'a>(raw: &'a [u8], id: &str) -> Option<&'a [u8]> {
+    let mut entity = raw;
+    let steps: Vec<&str> = id.split('.').collect();
+    for (i, step) in steps.iter().enumerate() {
+        let n: usize = step.parse().ok()?;
+        let last = i + 1 == steps.len();
+        let (head, body) = split_header(entity);
+        let content_type = header_raw(head, "content-type").unwrap_or_default();
+        let (mime, params) = header_params(&content_type);
+        let boundary = params.iter().find(|(k, _)| k == "boundary").map(|(_, v)| v);
+        match (mime.starts_with("multipart/"), boundary) {
+            (true, Some(b)) => entity = multipart_children(body, b).get(n.checked_sub(1)?)?,
+            _ if n == 1 && last => return Some(body),
+            _ => return None,
+        }
+    }
+    Some(split_header(entity).1)
 }
 
 /// The unfolded value of the first header named `name`, lowercased.
@@ -1430,6 +1621,46 @@ mod tests {
             t.idle(Duration::from_secs(1)).await.err(),
             Some(ImapError::Unsupported("IDLE"))
         );
+    }
+
+    #[tokio::test]
+    async fn mime_messages_are_described_and_fetched_by_part() {
+        let raw = "Message-ID: <m@x>\r\nContent-Type: multipart/mixed; boundary=\"b0\"\r\n\r\n\
+            preamble\r\n--b0\r\nContent-Type: multipart/alternative; boundary=b1\r\n\r\n\
+            --b1\r\nContent-Type: text/plain; charset=utf-8; format=flowed\r\n\r\nplain \r\nbody\r\n\
+            --b1\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\nPGI+aGk8L2I+\r\n\
+            --b1--\r\n--b0\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\nContent-Disposition: inline\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\niVBORw==\r\n--b0\r\nContent-Type: application/pdf; name=\"r.pdf\"\r\n\
+            Content-Disposition: attachment; filename*=UTF-8''r%C3%A9.pdf\r\n\r\nPDF\r\n--b0--\r\n";
+        let m = FakeMessage::mime(raw, 1);
+        let ids: Vec<&str> = m.body.leaves().iter().map(|p| p.part_id.as_str()).collect();
+        assert_eq!(ids, vec!["1.1", "1.2", "2", "3"]);
+        let leaves = m.body.leaves();
+        assert!(leaves[0].flowed);
+        assert_eq!(leaves[1].encoding.as_deref(), Some("base64"));
+        assert_eq!(leaves[2].content_id.as_deref(), Some("logo@x"));
+        assert_eq!(leaves[3].filename.as_deref(), Some("ré.pdf"));
+        assert_eq!(leaves[3].disposition.as_deref(), Some("attachment"));
+
+        let s = server(&["IMAP4rev1"]);
+        let uid = s.deliver("INBOX", m).unwrap();
+        let mut t = s.connect(&config(), &creds(PASS)).await.unwrap();
+        t.select("INBOX").await.unwrap();
+        assert_eq!(
+            t.uid_fetch_part(uid, "1.1", None).await.unwrap(),
+            b"plain \r\nbody"
+        );
+        assert_eq!(
+            t.uid_fetch_part(uid, "1.2", None).await.unwrap(),
+            b"PGI+aGk8L2I+"
+        );
+        assert_eq!(t.uid_fetch_part(uid, "3", Some(2)).await.unwrap(), b"PD");
+        assert!(t.uid_fetch_part(uid, "4", None).await.is_err());
+        assert!(t
+            .uid_fetch_part(uid, "", None)
+            .await
+            .unwrap()
+            .starts_with(b"Message-ID"));
     }
 
     #[test]

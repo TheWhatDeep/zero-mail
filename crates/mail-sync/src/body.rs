@@ -82,10 +82,22 @@ async fn fetch_text<T: ImapTransport>(
     }
 }
 
-/// Transfer decoding, then charset decoding. Unknown or invalid charset: UTF-8, then
-/// Windows-1252, then lossy UTF-8 (section 8). Never fails.
+/// Transfer decoding, then charset decoding, then `format=flowed` (section 8). Unknown or
+/// invalid charset: UTF-8, then Windows-1252, then lossy UTF-8. Never fails.
 pub(crate) fn decode_part(raw: &[u8], part: &BodyPart) -> String {
-    let bytes = match part.encoding.as_deref() {
+    let bytes = decode_transfer(raw, part.encoding.as_deref());
+    let text = decode_text(&bytes, part.charset.as_deref());
+    if part.flowed && part.mime == "text/plain" {
+        unflow(&text, part.delsp)
+    } else {
+        text
+    }
+}
+
+/// Undoes a content transfer encoding (base64 or quoted-printable). Anything else, and
+/// data that does not decode, is returned as it is.
+pub(crate) fn decode_transfer(raw: &[u8], encoding: Option<&str>) -> Vec<u8> {
+    match encoding.map(str::to_ascii_lowercase).as_deref() {
         Some("base64") => {
             let mut compact: Vec<u8> = raw
                 .iter()
@@ -98,8 +110,64 @@ pub(crate) fn decode_part(raw: &[u8], part: &BodyPart) -> String {
         }
         Some("quoted-printable") => quoted_printable_decode(raw).unwrap_or_else(|| raw.to_vec()),
         _ => raw.to_vec(),
-    };
-    decode_text(&bytes, part.charset.as_deref())
+    }
+}
+
+/// RFC 3676: joins soft-broken lines (a line ending in a space continues on the next line
+/// of the same quote depth), removes space-stuffing, and with `delsp=yes` drops the space
+/// that marked the break. The signature separator `-- ` is never joined. Quoted lines keep
+/// one `>` per level followed by a space.
+pub(crate) fn unflow(text: &str, delsp: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    // The paragraph being joined and its quote depth.
+    let mut open: Option<(usize, String)> = None;
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    for raw in lines {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let depth = line.chars().take_while(|c| *c == '>').count();
+        let mut content = &line[depth..];
+        content = content.strip_prefix(' ').unwrap_or(content);
+        let soft = content.ends_with(' ') && content != "-- ";
+        if let Some((d, para)) = open.as_mut() {
+            if *d != depth {
+                flush(&mut out, *d, para);
+                open = None;
+            }
+        }
+        let piece = if soft && delsp {
+            &content[..content.len() - 1]
+        } else {
+            content
+        };
+        match open.as_mut() {
+            Some((_, para)) => para.push_str(piece),
+            None => open = Some((depth, piece.to_string())),
+        }
+        if !soft {
+            if let Some((d, para)) = open.take() {
+                flush(&mut out, d, &para);
+            }
+        }
+    }
+    if let Some((d, para)) = open {
+        flush(&mut out, d, &para);
+    }
+    if !text.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn flush(out: &mut String, depth: usize, para: &str) {
+    if depth > 0 {
+        out.extend(std::iter::repeat_n('>', depth));
+        out.push(' ');
+    }
+    out.push_str(para);
+    out.push('\n');
 }
 
 fn decode_text(bytes: &[u8], charset: Option<&str>) -> String {
@@ -178,6 +246,24 @@ mod tests {
             decode_part(b"\x93\xfa\x96{", &part("8bit", Some("shift_jis"))),
             "日本"
         );
+    }
+
+    #[test]
+    fn format_flowed_is_joined() {
+        let text = "This is a \r\nflowed para.\r\n\r\n> quoted \r\n> soft\r\n>> deep\r\n -- not sig\r\n-- \r\nSig";
+        assert_eq!(
+            unflow(text, false),
+            "This is a flowed para.\n\n> quoted soft\n>> deep\n-- not sig\n-- \nSig"
+        );
+        assert_eq!(unflow("Hel \r\nlo\r\n", true), "Hello\n");
+        let flowed = BodyPart {
+            flowed: true,
+            ..part("7bit", Some("utf-8"))
+        };
+        assert_eq!(decode_part(b"a \r\nb", &flowed), "a b");
+        assert_eq!(decode_transfer(b"aGk=", Some("BASE64")), b"hi");
+        assert_eq!(decode_transfer(b"x=3Dy", Some("quoted-printable")), b"x=y");
+        assert_eq!(decode_transfer(b"raw", Some("binary")), b"raw");
     }
 
     #[test]

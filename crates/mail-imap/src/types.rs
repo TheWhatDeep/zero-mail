@@ -273,9 +273,14 @@ pub struct BodyPart {
     pub content_id: Option<String>,
     /// `inline` or `attachment` when a Content-Disposition is present.
     pub disposition: Option<String>,
-    /// Filename from the disposition, else the `name` content-type parameter.
+    /// Filename from the disposition, else the `name` content-type parameter. An RFC 2231
+    /// `filename*` value is decoded; RFC 2047 encoded words are left for the display layer.
     pub filename: Option<String>,
     pub size: u64,
+    /// `format=flowed` (RFC 3676) on a text part; section 8 honours it.
+    pub flowed: bool,
+    /// `delsp=yes` alongside `format=flowed`.
+    pub delsp: bool,
     pub children: Vec<BodyPart>,
 }
 
@@ -291,6 +296,8 @@ impl BodyPart {
             disposition: None,
             filename: None,
             size,
+            flowed: false,
+            delsp: false,
             children: Vec::new(),
         }
     }

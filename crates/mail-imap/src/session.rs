@@ -18,6 +18,7 @@ use tokio_rustls::client::TlsStream;
 
 use crate::net::{tcp_connect, tls_handshake};
 use crate::parse;
+use crate::trace::Traced;
 use crate::transport::{ConnectConfig, Credentials, ImapConnector, ImapTransport};
 use crate::types::{
     AppendUid, BodyPart, Capabilities, CopyUid, FetchedHeader, Flag, FlagSync, FlagUpdate,
@@ -26,7 +27,7 @@ use crate::types::{
 };
 use crate::{utf7, ErrorClass, ImapError, COMMAND_TIMEOUT, IDLE_READ_TIMEOUT, LARGE_FETCH_TIMEOUT};
 
-type Stream = TlsStream<TcpStream>;
+type Stream = Traced<TlsStream<TcpStream>>;
 type Session = async_imap::Session<Stream>;
 
 /// Reads the next response from a client or session. The end of the stream or an untagged
@@ -137,7 +138,7 @@ async fn open(config: &ConnectConfig) -> Result<(Client<Stream>, Capabilities), 
         }
     };
     let tls = tls_handshake(tcp, &config.host, config.pinned_cert_sha256, timeout).await?;
-    let mut client = Client::new(tls);
+    let mut client = Client::new(Traced::new(tls));
     let caps = match config.security {
         Security::Tls => match read_greeting(&mut client, timeout).await? {
             Some(caps) => caps,

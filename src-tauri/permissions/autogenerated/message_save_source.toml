@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-save-source"
+description = "Enables the message_save_source command without any pre-configured scope."
+commands.allow = ["message_save_source"]
+
+[[permission]]
+identifier = "deny-message-save-source"
+description = "Denies the message_save_source command without any pre-configured scope."
+commands.deny = ["message_save_source"]

@@ -675,24 +675,64 @@ pub(crate) fn get_body(conn: &Connection, id: MessageId) -> Result<Option<Body>>
     }
 }
 
-/// A message's attachment metadata, in part order.
-pub(crate) fn list_attachments(conn: &Connection, id: MessageId) -> Result<Vec<NewAttachment>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT part_id, filename, mime, size, content_id, is_inline FROM attachments
-         WHERE message_id = ?1 ORDER BY id",
-    )?;
-    let rows = stmt.query_map([id], |r| {
-        let size: i64 = r.get(3)?;
-        Ok(NewAttachment {
-            part_id: r.get(0)?,
-            filename: r.get(1)?,
-            mime: r.get(2)?,
+const ATTACHMENT_COLUMNS: &str =
+    "id, message_id, part_id, filename, mime, size, content_id, is_inline";
+
+fn attachment_row(r: &Row) -> rusqlite::Result<AttachmentRecord> {
+    let size: i64 = r.get(5)?;
+    Ok(AttachmentRecord {
+        id: r.get(0)?,
+        message_id: r.get(1)?,
+        attachment: NewAttachment {
+            part_id: r.get(2)?,
+            filename: r.get(3)?,
+            mime: r.get(4)?,
             size: u64::try_from(size).unwrap_or(0),
-            content_id: r.get(4)?,
-            is_inline: r.get(5)?,
-        })
-    })?;
+            content_id: r.get(6)?,
+            is_inline: r.get(7)?,
+        },
+    })
+}
+
+/// A message's attachment rows, in part order.
+pub(crate) fn list_attachments(conn: &Connection, id: MessageId) -> Result<Vec<AttachmentRecord>> {
+    let sql =
+        format!("SELECT {ATTACHMENT_COLUMNS} FROM attachments WHERE message_id = ?1 ORDER BY id");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map([id], attachment_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn get_attachment(conn: &Connection, id: AttachmentId) -> Result<AttachmentRecord> {
+    let sql = format!("SELECT {ATTACHMENT_COLUMNS} FROM attachments WHERE id = ?1");
+    Ok(conn.query_row(&sql, [id], attachment_row)?)
+}
+
+/// Always load remote images from this sender (section 8, `remote_image_allow`).
+pub(crate) fn allow_remote_images(
+    tx: &Transaction,
+    account_id: AccountId,
+    sender: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO remote_image_allow (account_id, sender_addr) VALUES (?1, ?2)
+         ON CONFLICT DO NOTHING",
+        params![account_id, sender],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn remote_images_allowed(
+    conn: &Connection,
+    account_id: AccountId,
+    sender: &str,
+) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM remote_image_allow WHERE account_id = ?1 AND sender_addr = ?2",
+        params![account_id, sender],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// `PRAGMA quick_check` (section 12, SPEC_GAPS G48).

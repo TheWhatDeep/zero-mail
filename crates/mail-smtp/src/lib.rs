@@ -11,6 +11,9 @@
 
 mod error;
 mod tls;
+mod trace;
+
+pub use trace::TARGET as TRACE_TARGET;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;

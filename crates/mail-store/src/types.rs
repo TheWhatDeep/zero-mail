@@ -7,6 +7,7 @@ pub type FolderId = i64;
 pub type ThreadId = i64;
 pub type MessageId = i64;
 pub type IdentityId = i64;
+pub type AttachmentId = i64;
 
 /// Transport security for an endpoint. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +290,14 @@ pub struct NewAttachment {
     pub size: u64,
     pub content_id: Option<String>,
     pub is_inline: bool,
+}
+
+/// A stored attachment row (section 8: metadata only; the bytes are fetched on demand).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRecord {
+    pub id: AttachmentId,
+    pub message_id: MessageId,
+    pub attachment: NewAttachment,
 }
 
 /// A message header row as sync writes it, with its attachment metadata.

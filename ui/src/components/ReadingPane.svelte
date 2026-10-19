@@ -1,14 +1,16 @@
 <script lang="ts">
-  // The reading pane (section 11, right; design 3a reading card). The body is plain text
-  // from mail-body:// in <iframe sandbox="allow-scripts"> without allow-same-origin
-  // (section 8, step 4; SPEC_GAPS G42). The only script in it is Core's, with a nonce; it
-  // posts the content height, which sizes the frame. A message deleted on the server keeps
-  // its body with a notice until it is closed (section 12; T04).
+  // The reading pane (section 11, right; design 3a reading card). The body comes from
+  // mail-body:// in <iframe sandbox="allow-scripts"> without allow-same-origin (section 8,
+  // step 4). The only script in it is Core's, with a nonce: it posts the content height,
+  // link clicks and the hovered link. Links open only through decideLink (T21); remote
+  // images load only after Load images (T20); attachments are fetched on Open or Save (T23).
+  // A message deleted on the server keeps its body with a notice until closed (T04).
   import { onMount } from "svelte";
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
-  import { addressList, personName, readerDateText, subjectText } from "../lib/format";
-  import { commands, toAppError } from "../lib/ipc";
+  import { addressList, formatSize, personName, readerDateText, subjectText } from "../lib/format";
+  import { commands, toAppError, type AppError, type Attachment } from "../lib/ipc";
+  import { bodyUrl, decideLink, type LinkAction } from "../lib/links";
   import { platformUrl, usesHttpScheme } from "../lib/protocol";
   import { applyOpen, bodyArrived, emptyReader, type ReaderState } from "../lib/reader";
   import { app } from "../state/app.svelte";
@@ -17,8 +19,15 @@
   let reader = $state<ReaderState>(emptyReader);
   let frame: HTMLIFrameElement | undefined = $state();
   let frameHeight = $state(0);
-  /** Reloads the frame once a body that was loading has arrived. */
+  /** Reloads the frame when the body or its images switch changes. */
   let frameKey = $state(0);
+  /** The per-message plain-text toggle (SPEC_GAPS G53). */
+  let plain = $state(false);
+  /** A link waiting for the user's confirmation (host mismatch). */
+  let pendingLink = $state<Extract<LinkAction, { kind: "confirm" }> | null>(null);
+  /** An executable attachment waiting for confirmation before Open. */
+  let pendingOpen = $state<Attachment | null>(null);
+  let actionError = $state<AppError | null>(null);
   const http = typeof navigator !== "undefined" && usesHttpScheme(navigator.userAgent);
 
   async function open(id: number): Promise<void> {
@@ -38,6 +47,11 @@
   $effect(() => {
     const id = app.message;
     frameHeight = 0;
+    plain = false;
+    pendingLink = null;
+    pendingOpen = null;
+    actionError = null;
+    app.hoveredLink = null;
     if (id === null) {
       reader = emptyReader;
       return;
@@ -53,16 +67,62 @@
     if (n > 0 && app.message === s.view.id) void open(s.view.id);
   });
 
+  /** Runs a command; a failure shows in the pane, a cancelled dialog shows nothing. */
+  async function run(action: () => Promise<unknown>): Promise<void> {
+    actionError = null;
+    try {
+      await action();
+    } catch (err) {
+      const e = toAppError(err);
+      if (e.code !== "cancelled") actionError = e;
+    }
+  }
+
+  function onLink(href: string, text: string): void {
+    const action = decideLink(href, text);
+    pendingLink = null;
+    if (action.kind === "open") void run(() => commands["link.open"](action.href));
+    else if (action.kind === "confirm") pendingLink = action;
+    // compose: mailto opens compose from M7 (SPEC_GAPS G57); ignore: nothing happens.
+  }
+
+  async function allowImages(always: boolean): Promise<void> {
+    const s = reader;
+    if (s.kind !== "open") return;
+    const id = s.view.id;
+    await run(async () => {
+      await (always ? commands["images.allow_sender"](id) : commands["images.allow_once"](id));
+      await open(id);
+      frameKey += 1;
+    });
+  }
+
+  function openAttachment(a: Attachment): void {
+    pendingOpen = null;
+    if (a.executable) {
+      pendingOpen = a;
+      return;
+    }
+    void run(() => commands["attachment.open"](a.id));
+  }
+
   onMount(() => {
     const onMessage = (e: MessageEvent) => {
       if (!frame || e.source !== frame.contentWindow) return;
-      const data = e.data as { zeromail?: unknown; height?: unknown } | null;
+      const data = e.data as { zeromail?: unknown; height?: unknown; href?: unknown; text?: unknown } | null;
       if (data?.zeromail === "height" && typeof data.height === "number" && Number.isFinite(data.height)) {
         frameHeight = Math.max(0, Math.ceil(data.height));
+      } else if (data?.zeromail === "link" && typeof data.href === "string") {
+        onLink(data.href, typeof data.text === "string" ? data.text : "");
+      } else if (data?.zeromail === "hover") {
+        app.hoveredLink = typeof data.href === "string" ? data.href : null;
       }
     };
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      app.hoveredLink = null;
+    };
   });
 
   const view = $derived(reader.kind === "open" ? reader.view : null);
@@ -91,13 +151,63 @@
           {#if view.to.length > 0}<div class="meta-small">{strings.to} {addressList(view.to)}</div>{/if}
           {#if view.cc.length > 0}<div class="meta-small">{strings.cc} {addressList(view.cc)}</div>{/if}
         </div>
-        <time class="meta-small" datetime={new Date(view.date_utc * 1000).toISOString()}>{readerDateText(view.date_utc)}</time>
+        <div class="side">
+          <time class="meta-small" datetime={new Date(view.date_utc * 1000).toISOString()}>{readerDateText(view.date_utc)}</time>
+          {#if view.has_html && view.body_kind === "html"}
+            <button class="small tint press" onclick={() => ((plain = !plain), (frameKey += 1), (frameHeight = 0))}>
+              {plain ? strings.showFormatted : strings.showPlainText}
+            </button>
+          {/if}
+        </div>
       </div>
+
+      {#if pendingLink}
+        <div class="notice confirm" role="alertdialog" aria-label={strings.linkCheckTitle}>
+          <span class="text">{strings.linkMismatch(pendingLink.shownHost, pendingLink.realHost)}</span>
+          <span class="actions">
+            <button
+              class="small tint press"
+              onclick={() => {
+                const href = pendingLink?.href;
+                pendingLink = null;
+                if (href) void run(() => commands["link.open"](href));
+              }}>{strings.openLink}</button
+            >
+            <button class="small tint press" onclick={() => (pendingLink = null)}>{strings.cancel}</button>
+          </span>
+        </div>
+      {/if}
+      {#if actionError}
+        <p class="notice" role="alert">{errorText[actionError.code]}</p>
+      {/if}
+
       {#if view.body_kind === "loading"}
         <p class="meta" role="status">{strings.loadingBody}</p>
+      {:else if view.body_kind === "unreadable"}
+        <div class="notice" role="status">
+          <span class="text">{strings.couldNotDisplay}</span>
+          <button class="small tint press" onclick={() => run(() => commands["message.save_source"](view.id))}>
+            {strings.saveSource}
+          </button>
+        </div>
       {:else}
-        {#if view.body_kind === "plain_truncated"}
-          <p class="notice" role="status">{strings.truncated}</p>
+        {#if view.truncated}
+          <div class="notice" role="status">
+            <span class="text">{strings.truncated}</span>
+            <button class="small tint press" onclick={() => run(() => commands["message.save_source"](view.id))}>
+              {strings.saveSource}
+            </button>
+          </div>
+        {/if}
+        {#if view.remote_images === "blocked" && !plain}
+          <div class="notice" role="status">
+            <Icon name="lockSimple" size="--icon-14" />
+            <span class="text">{strings.imagesBlocked}</span>
+            <span class="actions">
+              <button class="small tint press" onclick={() => allowImages(false)}>{strings.loadImages}</button>
+              <button class="small tint press" onclick={() => allowImages(true)}>{strings.alwaysLoadImages}</button>
+            </span>
+          </div>
         {/if}
         <div class="canvas">
           {#key `${view.id}:${frameKey}`}
@@ -106,11 +216,43 @@
               title={strings.bodyFrameTitle}
               sandbox="allow-scripts"
               referrerpolicy="no-referrer"
-              src={platformUrl(view.body_url, http)}
+              src={platformUrl(bodyUrl(view.body_url, plain), http)}
               style:height={`${frameHeight}px`}
             ></iframe>
           {/key}
         </div>
+      {/if}
+
+      {#if view.attachments.length > 0}
+        <ul class="attachments" aria-label={strings.attachmentsLabel}>
+          {#each view.attachments as a (a.id)}
+            <li class="attachment">
+              <span class="file"><Icon name="fileText" size="--icon-16" /></span>
+              <span class="file-name" title={a.filename}>{a.filename || strings.unnamedAttachment}</span>
+              <span class="meta-small">{formatSize(a.size)}</span>
+              <button class="small tint press" onclick={() => openAttachment(a)}>{strings.openAttachment}</button>
+              <button class="small tint press" onclick={() => run(() => commands["attachment.save"](a.id))}>
+                {strings.saveAttachment}
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if pendingOpen}
+          <div class="notice confirm" role="alertdialog" aria-label={strings.executableTitle}>
+            <span class="text">{strings.executableWarning(pendingOpen.filename)}</span>
+            <span class="actions">
+              <button
+                class="small tint press"
+                onclick={() => {
+                  const id = pendingOpen?.id;
+                  pendingOpen = null;
+                  if (id !== undefined) void run(() => commands["attachment.open"](id));
+                }}>{strings.openAnyway}</button
+              >
+              <button class="small tint press" onclick={() => (pendingOpen = null)}>{strings.cancel}</button>
+            </span>
+          </div>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -132,11 +274,6 @@
     margin: auto;
     color: var(--color-text-muted);
   }
-
-
-
-
-
 
   .body {
     flex: 1;
@@ -167,6 +304,13 @@
   .who {
     flex: 1;
     min-width: 0;
+  }
+
+  .side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--space-6);
   }
 
   .from {
@@ -200,12 +344,37 @@
     margin: 0;
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-8);
     padding: var(--space-8) var(--space-12);
     border-radius: var(--radius-input);
     background: var(--color-surface-sunken);
     border: 1px solid var(--color-divider);
     color: var(--color-text-muted-strong);
+  }
+
+  .notice .text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .actions {
+    display: flex;
+    gap: var(--space-6);
+  }
+
+  .small {
+    --tint: var(--color-button-hover);
+    height: var(--button-height-small);
+    padding: 0 var(--space-10);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-small-button);
+    background: var(--color-secondary-bg);
+    color: var(--color-secondary-fg);
+    font-size: var(--text-meta);
+    font-weight: var(--font-weight-medium);
+    white-space: nowrap;
   }
 
   .canvas {
@@ -218,5 +387,36 @@
     width: 100%;
     border: 0;
     background: var(--color-message-canvas);
+  }
+
+  .attachments {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+  }
+
+  .attachment {
+    display: flex;
+    align-items: center;
+    gap: var(--space-8);
+    padding: var(--space-6) var(--space-6) var(--space-6) var(--space-10);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-input);
+  }
+
+  .file {
+    display: inline-flex;
+    color: var(--color-file-icon);
+  }
+
+  .file-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 </style>

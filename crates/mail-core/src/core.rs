@@ -1,17 +1,22 @@
-//! The app facade (section 3): every command `app` exposes in M4, the sync actors, and the
-//! events the UI listens to. `app` holds no logic; it calls these methods and forwards
-//! [`CoreEvent`]s.
+//! The app facade (section 3): every command `app` exposes, the sync actors, the custom
+//! protocols and the events the UI listens to. `app` holds no logic; it calls these methods
+//! and forwards [`CoreEvent`]s.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use mail_auth::{HttpGet, KeychainLogins};
 use mail_imap::ImapConnector;
+use mail_render::{
+    AttachmentCache, BodyRequest, BodyResponse, CacheKey, RemoteProxy, TempFiles, UrlForm,
+};
 use mail_secrets::SecretStore;
 use mail_smtp::SmtpCheck;
-use mail_store::{AccountId, FolderId, MessageId, Store, StoreError};
+use mail_store::{
+    AccountId, AttachmentId, AttachmentRecord, FolderId, MessageId, Store, StoreError,
+};
 use mail_sync::{
     spawn_account, AccountHandle, AccountState, Events, SyncDeps, SyncError, SyncEvent,
 };
@@ -21,7 +26,9 @@ use tokio::time::Instant;
 
 use crate::accounts::{AccountConfig, AccountSummary, Accounts, Candidate, TestReport};
 use crate::error::{AppError, ErrorCode};
-use crate::views::{self, ListRequest, MessageView, PageView, RowView, Scope};
+use crate::views::{
+    self, BodyInfo, ListRequest, MessageView, PageView, RemoteImages, RowView, Scope,
+};
 
 /// `store-changed` is debounced to this window (section 3).
 pub const STORE_CHANGED_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -29,6 +36,13 @@ pub const STORE_CHANGED_DEBOUNCE: Duration = Duration::from_millis(100);
 pub const QUICK_CHECK_DELAY: Duration = Duration::from_secs(10);
 
 const DB_FILE: &str = "mail.db";
+/// The attachment byte cache (invariant 3; SPEC_GAPS G57).
+const CACHE_DIR: &str = "attachments";
+/// Attachments the user opens (section 13.5; SPEC_GAPS G57).
+const TEMP_DIR: &str = "tmp";
+/// Schemes `link.open` hands to the OS (section 8, Links; SPEC_GAPS G52). `mailto` opens
+/// compose instead.
+const LINK_SCHEMES: &[&str] = &["http", "https", "tel"];
 /// Written when a background check fails; the next start moves the database aside.
 const REBUILD_MARKER: &str = "rebuild-database";
 
@@ -147,6 +161,15 @@ pub struct Core<I, S, H> {
     sink: EventSink,
     /// The delayed integrity check; cancelled at shutdown.
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    data_dir: PathBuf,
+    form: UrlForm,
+    proxy: RemoteProxy,
+    cache: AttachmentCache,
+    temp: TempFiles,
+    /// Load images, for this session only (section 8, Remote images).
+    images_once: Mutex<HashSet<MessageId>>,
+    /// Bodies the server could not deliver: Could not display this message (section 12).
+    unreadable: Arc<Mutex<HashSet<MessageId>>>,
 }
 
 impl<I, S, H> std::fmt::Debug for Core<I, S, H> {
@@ -211,6 +234,18 @@ where
         let (store, rebuilt) = tokio::task::spawn_blocking(move || open_store(&data_dir))
             .await
             .map_err(|_| AppError::new(ErrorCode::Internal, "startup task failed"))??;
+        let debug = matches!(
+            store.get_setting(crate::logging::DEBUG_SETTING).await?,
+            Some(serde_json::Value::Bool(true))
+        );
+        crate::logging::set_debug(debug);
+        let temp = TempFiles::new(config.data_dir.join(TEMP_DIR));
+        // Files opened in an earlier run are deleted at the next start (section 13.5).
+        if let Err(e) = temp.clear() {
+            tracing::warn!(error = %e, "could not clear the temp folder");
+        }
+        let proxy =
+            RemoteProxy::new().map_err(|e| AppError::new(ErrorCode::Internal, e.to_string()))?;
         let (tx, rx) = mpsc::unbounded_channel();
         let states: States = Arc::default();
         let deps = SyncDeps {
@@ -233,6 +268,16 @@ where
             states: Arc::clone(&states),
             sink: Arc::clone(&sink),
             background: Mutex::default(),
+            data_dir: config.data_dir.clone(),
+            form: UrlForm::native(),
+            proxy,
+            cache: AttachmentCache::new(
+                config.data_dir.join(CACHE_DIR),
+                mail_render::files::CACHE_CAP,
+            ),
+            temp,
+            images_once: Mutex::default(),
+            unreadable: Arc::default(),
         });
         tokio::spawn(pump(rx, Arc::clone(&sink), states));
         if rebuilt {
@@ -319,13 +364,16 @@ where
         Ok(summary)
     }
 
+    /// Removes the account's rows, keychain entries and cached files (section 5).
     pub async fn account_remove(&self, account_id: AccountId) -> Result<(), AppError> {
         let actor = self.actors.lock().await.remove(&account_id);
         if let Some(actor) = actor {
             actor.shutdown().await;
         }
         lock(&self.states).remove(&account_id);
-        self.accounts.remove(account_id).await
+        self.accounts.remove(account_id).await?;
+        let cache = self.cache.clone();
+        blocking(move || cache.remove_account(account_id)).await
     }
 
     pub async fn account_set_enabled(
@@ -393,32 +441,295 @@ where
     }
 
     /// `message.open`. An uncached body is fetched ahead of everything else; the reader
-    /// shows Loading until `store-changed` brings it.
+    /// shows Loading until `store-changed` brings it. A body the server cannot deliver turns
+    /// into Could not display this message (section 12).
     pub async fn message_open(&self, message_id: MessageId) -> Result<MessageView, AppError> {
         let message = self.store.get_message(message_id).await?;
         let attachments = self.store.list_attachments(message_id).await?;
-        if message.body_state == mail_store::BodyState::None {
-            self.with_actor(message.account_id, |h| h.fetch_body(message_id))
-                .await;
+        let body = self.store.get_body(message_id).await?;
+        let unreadable = lock(&self.unreadable).contains(&message_id);
+        if message.body_state == mail_store::BodyState::None && !unreadable {
+            let rx = self
+                .actors
+                .lock()
+                .await
+                .get(&message.account_id)
+                .map(|h| h.fetch_body(message_id));
+            if let Some(rx) = rx {
+                let failed = Arc::clone(&self.unreadable);
+                let sink = Arc::clone(&self.sink);
+                let (account_id, folder_id) = (message.account_id, message.folder_id);
+                tokio::spawn(async move {
+                    // Offline or a dropped connection is not a broken message; only a
+                    // permanent refusal of this message is.
+                    if let Ok(Err(e)) = rx.await {
+                        if matches!(e, SyncError::Imap(ref i) if i.class() == mail_imap::ErrorClass::Permanent)
+                        {
+                            lock(&failed).insert(message_id);
+                            sink(CoreEvent::StoreChanged {
+                                account_id,
+                                folder_id: Some(folder_id),
+                            });
+                        }
+                    }
+                });
+            }
         }
-        Ok(views::message_view(&message, &attachments))
+        let has_html = body
+            .as_ref()
+            .is_some_and(|b| !b.text_html.trim().is_empty());
+        let remote = match &body {
+            Some(b) if has_html && mail_render::remote_image_count(b, self.form) > 0 => {
+                if self.images_allowed(&message).await? {
+                    RemoteImages::Allowed
+                } else {
+                    RemoteImages::Blocked
+                }
+            }
+            _ => RemoteImages::None,
+        };
+        let info = BodyInfo {
+            has_html,
+            remote_images: remote,
+            unreadable,
+        };
+        Ok(views::message_view(&message, &attachments, info))
     }
 
-    /// The `mail-body` protocol response.
+    /// Images load for a message the user allowed once, or whose sender is on the
+    /// account's allowlist (section 8).
+    async fn images_allowed(&self, message: &mail_store::MessageRecord) -> Result<bool, AppError> {
+        if lock(&self.images_once).contains(&message.id) {
+            return Ok(true);
+        }
+        if message.from.addr.is_empty() {
+            return Ok(false);
+        }
+        Ok(self
+            .store
+            .remote_images_allowed(message.account_id, &message.from.addr)
+            .await?)
+    }
+
+    /// `images.allow_once`: Load images, for this message and this session.
+    pub async fn images_allow_once(&self, message_id: MessageId) -> Result<(), AppError> {
+        self.store.get_message(message_id).await?;
+        lock(&self.images_once).insert(message_id);
+        Ok(())
+    }
+
+    /// `images.allow_sender`: Always load from this sender (`remote_image_allow`).
+    pub async fn images_allow_sender(&self, message_id: MessageId) -> Result<(), AppError> {
+        let message = self.store.get_message(message_id).await?;
+        if message.from.addr.is_empty() {
+            return Err(AppError::invalid("the message has no sender address"));
+        }
+        self.store
+            .allow_remote_images(message.account_id, &message.from.addr)
+            .await?;
+        Ok(())
+    }
+
+    /// The `mail-body` protocol response for `mail-body://<message>?<query>`. `images=1`
+    /// counts only for a message whose images are allowed (SPEC_GAPS G57).
     pub async fn mail_body(
         &self,
         message_id: MessageId,
-        images: bool,
-    ) -> Result<mail_render::BodyResponse, AppError> {
-        mail_render::mail_body(&self.store, message_id, images)
+        query: &str,
+    ) -> Result<BodyResponse, AppError> {
+        let mut request = BodyRequest::from_query(query);
+        if request.images {
+            request.images = match self.store.get_message(message_id).await {
+                Ok(m) => self.images_allowed(&m).await?,
+                Err(StoreError::NotFound) => false,
+                Err(e) => return Err(e.into()),
+            };
+        }
+        mail_render::mail_body(&self.store, message_id, request, self.form)
             .await
             .map_err(|mail_render::RenderError::Store(e)| AppError::from(e))
     }
 
-    /// Stops every actor and background task (app quit).
+    /// The `mail-cid` protocol response for the path `<message>/<cid>`: an inline image of
+    /// that message, images only (section 8, Attachments).
+    pub async fn mail_cid(&self, path: &str) -> BodyResponse {
+        let path = mail_render::urls::request_path(path);
+        let Some((id, cid)) = path.split_once('/') else {
+            return mail_render::empty_response(400);
+        };
+        let (Ok(message_id), cid) = (id.parse::<MessageId>(), mail_render::urls::decode(cid))
+        else {
+            return mail_render::empty_response(400);
+        };
+        let Ok(attachments) = self.store.list_attachments(message_id).await else {
+            return mail_render::empty_response(404);
+        };
+        let found = attachments.into_iter().find(|a| {
+            a.attachment.mime.starts_with("image/")
+                && a.attachment
+                    .content_id
+                    .as_deref()
+                    .is_some_and(|c| c.eq_ignore_ascii_case(&cid))
+        });
+        let Some(record) = found else {
+            return mail_render::empty_response(404);
+        };
+        match self.attachment_bytes(&record).await {
+            Ok(bytes) => mail_render::image_response(&record.attachment.mime, bytes),
+            Err(_) => mail_render::empty_response(502),
+        }
+    }
+
+    /// The `mail-remote` protocol response: the image through the proxy (section 8).
+    pub async fn mail_remote(&self, path: &str) -> BodyResponse {
+        match self.proxy.fetch(path).await {
+            Ok(img) => mail_render::image_response(&img.content_type, img.bytes),
+            Err(_) => mail_render::empty_response(404),
+        }
+    }
+
+    /// A part's bytes, from the cache or fetched on demand through the account's actor
+    /// (invariant 3).
+    async fn attachment_bytes(&self, record: &AttachmentRecord) -> Result<Vec<u8>, AppError> {
+        let message = self.store.get_message(record.message_id).await?;
+        let folder = self.store.get_folder(message.folder_id).await?;
+        let key = CacheKey {
+            account_id: message.account_id,
+            folder_id: folder.id,
+            uidvalidity: folder.uidvalidity,
+            uid: message.uid,
+            part_id: record.attachment.part_id.clone(),
+        };
+        let cache = self.cache.clone();
+        let lookup = key.clone();
+        if let Some(bytes) = blocking(move || Ok(cache.get(&lookup))).await? {
+            return Ok(bytes);
+        }
+        let bytes = self
+            .fetch_part(message.account_id, message.id, &record.attachment.part_id)
+            .await?;
+        let cache = self.cache.clone();
+        let stored = bytes.clone();
+        if let Err(e) = blocking(move || cache.put(&key, &stored)).await {
+            tracing::warn!(code = ?e.code, "attachment not cached");
+        }
+        Ok(bytes)
+    }
+
+    /// One part (or with `""` the raw source) through the account's actor. An account that
+    /// is offline or off answers `network`.
+    async fn fetch_part(
+        &self,
+        account_id: AccountId,
+        message_id: MessageId,
+        part_id: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        let rx = self
+            .actors
+            .lock()
+            .await
+            .get(&account_id)
+            .map(|h| h.fetch_part(message_id, part_id));
+        let offline =
+            || AppError::new(ErrorCode::Network, "the account is offline").for_account(account_id);
+        match rx {
+            None => Err(offline()),
+            Some(rx) => match rx.await {
+                Ok(Ok(bytes)) => Ok(bytes),
+                Ok(Err(e)) => Err(sync_error(&e).for_account(account_id)),
+                Err(_) => Err(offline()),
+            },
+        }
+    }
+
+    async fn attachment(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<(AttachmentRecord, String), AppError> {
+        let record = self.store.get_attachment(attachment_id).await?;
+        let name = mail_render::display_name(&record.attachment.filename);
+        Ok((record, name))
+    }
+
+    /// The name a Save dialog offers for an attachment (SPEC_GAPS G54, G55).
+    pub async fn attachment_file_name(
+        &self,
+        attachment_id: AttachmentId,
+    ) -> Result<String, AppError> {
+        let (_, name) = self.attachment(attachment_id).await?;
+        Ok(mail_render::safe_name(&name))
+    }
+
+    /// `attachment.open`: fetched on demand into a randomly named temp folder (section 8;
+    /// 13.5). Returns the file for the app to hand to the OS default app. The UI asks
+    /// first for executable types.
+    pub async fn attachment_open(&self, attachment_id: AttachmentId) -> Result<PathBuf, AppError> {
+        let (record, name) = self.attachment(attachment_id).await?;
+        let bytes = self.attachment_bytes(&record).await?;
+        let temp = self.temp.clone();
+        blocking(move || temp.write(&name, &bytes)).await
+    }
+
+    /// `attachment.save` to the path the user chose.
+    pub async fn attachment_save(
+        &self,
+        attachment_id: AttachmentId,
+        path: PathBuf,
+    ) -> Result<(), AppError> {
+        let (record, _) = self.attachment(attachment_id).await?;
+        let bytes = self.attachment_bytes(&record).await?;
+        blocking(move || std::fs::write(&path, &bytes)).await
+    }
+
+    /// The name a Save dialog offers for a message's source: its subject, `.eml`.
+    pub async fn source_file_name(&self, message_id: MessageId) -> Result<String, AppError> {
+        let message = self.store.get_message(message_id).await?;
+        let stem = if message.subject.trim().is_empty() {
+            "message"
+        } else {
+            message.subject.trim()
+        };
+        let stem: String = stem.chars().take(150).collect();
+        Ok(mail_render::safe_name(&format!("{stem}.eml")))
+    }
+
+    /// `message.save_source`: the raw message, fetched on demand and never stored
+    /// (invariant 3), written to the path the user chose (section 12; SPEC_GAPS G54).
+    pub async fn message_save_source(
+        &self,
+        message_id: MessageId,
+        path: PathBuf,
+    ) -> Result<(), AppError> {
+        let message = self.store.get_message(message_id).await?;
+        let bytes = self.fetch_part(message.account_id, message_id, "").await?;
+        blocking(move || std::fs::write(&path, &bytes)).await
+    }
+
+    /// `link.open`: checks the URL; the app then hands it to the OS (SPEC_GAPS G52).
+    pub fn link_check(&self, url: &str) -> Result<String, AppError> {
+        let url = url.trim();
+        match mail_render::urls::scheme(url) {
+            Some(s) if LINK_SCHEMES.contains(&s.as_str()) && url.len() > s.len() + 1 => {
+                Ok(url.to_string())
+            }
+            _ => Err(AppError::invalid(
+                "only http, https and tel links open outside the app",
+            )),
+        }
+    }
+
+    /// The log folder `log.open` shows (section 13.8).
+    pub fn log_dir(&self) -> PathBuf {
+        crate::logging::log_dir(&self.data_dir)
+    }
+
+    /// Stops every actor and background task and deletes opened attachments (app quit).
     pub async fn shutdown(&self) {
         for task in lock(&self.background).drain(..) {
             task.abort();
+        }
+        if let Err(e) = self.temp.clear() {
+            tracing::warn!(error = %e, "could not clear the temp folder");
         }
         let actors: Vec<AccountHandle> = self.actors.lock().await.drain().map(|(_, h)| h).collect();
         for a in actors {
@@ -429,6 +740,16 @@ where
     pub fn emit(&self, event: CoreEvent) {
         (self.sink)(event);
     }
+}
+
+/// Runs file work off the async threads; an I/O failure is `io`.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> Result<T, AppError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| AppError::new(ErrorCode::Internal, "file task failed"))?
+        .map_err(|e| AppError::new(ErrorCode::Io, e.kind().to_string()))
 }
 
 /// Forwards sync events to the UI. `store-changed` is coalesced per (account, folder) into

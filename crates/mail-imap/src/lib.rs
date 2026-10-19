@@ -11,6 +11,7 @@ mod net;
 mod parse;
 mod roles;
 mod session;
+mod trace;
 mod transport;
 mod types;
 pub mod utf7;
@@ -22,6 +23,7 @@ pub use error::{ErrorClass, ImapError};
 pub use net::{hex, parse_fingerprint};
 pub use roles::assign_roles;
 pub use session::{ImapClient, ImapSession, HEADER_FIELDS};
+pub use trace::TARGET as TRACE_TARGET;
 pub use transport::{ConnectConfig, Credentials, ImapConnector, ImapTransport, Secret};
 pub use types::{
     AppendUid, BodyPart, Capabilities, CopyUid, FetchedHeader, Flag, FlagSync, FlagUpdate,

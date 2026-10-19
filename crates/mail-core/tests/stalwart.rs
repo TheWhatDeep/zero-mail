@@ -164,6 +164,131 @@ async fn list_reports_inbox_and_roles_through_the_real_transport() {
     session.logout().await.unwrap();
 }
 
+/// M5 through the real transport: a multipart message APPENDed to Carol's INBOX syncs, its
+/// HTML body is served sanitized, its `cid:` image comes through `mail-cid`, and its base64
+/// attachment is fetched on Save with the server's own BODYSTRUCTURE part ids (T23, T24).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the Stalwart container; runs in CI"]
+async fn m5_html_cid_images_and_attachments_through_the_real_transport() {
+    use mail_core::views::{BodyKind, ListRequest, Scope};
+    use mail_core::{Core, CoreConfig, CoreEvent, EventSink, StateName};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    let dir = TempDir::new("stalwart-m5");
+    let accounts = service(&dir).await;
+    let pin_hex = fingerprint(&accounts).await;
+    drop(accounts);
+    let pin = mail_imap::parse_fingerprint(&pin_hex).unwrap();
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("m5-{nanos}");
+    let raw = format!(
+        "Message-ID: <{subject}@tests.local>\r\nFrom: Alice <alice@test.local>\r\nTo: carol@test.local\r\n\
+         Subject: {subject}\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"m\"\r\n\r\n\
+         --m\r\nContent-Type: multipart/related; boundary=\"r\"\r\n\r\n\
+         --r\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p onclick=\"x()\">Hi</p><img src=\"cid:logo@m5\"><script>bad()</script>\r\n\
+         --r\r\nContent-Type: image/png\r\nContent-ID: <logo@m5>\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgpmYWtlcG5n\r\n\
+         --r--\r\n\
+         --m\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=\"CON.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQgdGVzdA==\r\n--m--\r\n"
+    );
+    let imap_config = ConnectConfig {
+        host: HOST.into(),
+        port: IMAPS,
+        security: mail_imap::Security::Tls,
+        pinned_cert_sha256: Some(pin),
+        connect_timeout: mail_imap::CONNECT_TIMEOUT,
+    };
+    let creds = Credentials::Password {
+        username: "carol".into(),
+        password: Secret::new("carol-test-pw"),
+    };
+    let mut session = ImapClient.connect(&imap_config, &creds).await.unwrap();
+    session.append("INBOX", &[], raw.as_bytes()).await.unwrap();
+    session.logout().await.unwrap();
+
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let sink: EventSink = Arc::new(move |e| log.lock().unwrap().push(e));
+    let core = Core::start(
+        CoreConfig {
+            data_dir: dir.path().join("core"),
+            secrets: secrets() as Arc<dyn SecretStore>,
+            imap: ImapClient,
+            smtp: SmtpClient,
+            http: NoHttp,
+        },
+        sink,
+    )
+    .await
+    .unwrap();
+    let mut c = config("carol", "carol-test-pw", false);
+    c.pinned_cert_sha256 = Some(pin_hex);
+    let account = core.account_add(c).await.unwrap().id;
+    let start = std::time::Instant::now();
+    let message = loop {
+        assert!(start.elapsed() < Duration::from_secs(60), "never synced");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let idle = events.lock().unwrap().iter().any(|e| {
+            matches!(e, CoreEvent::AccountState { state: StateName::Idle, account_id, .. } if *account_id == account)
+        });
+        if !idle {
+            continue;
+        }
+        let folders = core.folder_list(account).await.unwrap();
+        let page = core
+            .list_page(ListRequest {
+                scope: Scope::Folder {
+                    folder_id: folders[0].id,
+                },
+                cursor: None,
+                limit: 500,
+                group_by_thread: false,
+            })
+            .await
+            .unwrap();
+        if let Some(row) = page.rows.iter().find(|r| r.subject == subject) {
+            break row.id;
+        }
+    };
+    let view = loop {
+        let view = core.message_open(message).await.unwrap();
+        if view.body_kind != BodyKind::Loading {
+            break view;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(90),
+            "body never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(view.body_kind, BodyKind::Html);
+    assert_eq!(view.attachments.len(), 1, "the inline image is not listed");
+    let body = core.mail_body(message, "images=0").await.unwrap();
+    let html = String::from_utf8(body.body).unwrap();
+    assert!(html.contains("<p>Hi</p>") && !html.contains("bad()") && !html.contains("onclick"));
+    assert_eq!(html.matches("<script").count(), 1);
+    let image = core.mail_cid(&format!("/{message}/logo%40m5")).await;
+    assert_eq!(image.status, 200);
+    assert_eq!(image.body, b"\x89PNG\r\n\x1a\nfakepng");
+
+    let pdf = view.attachments[0].id;
+    assert_eq!(core.attachment_file_name(pdf).await.unwrap(), "_CON.pdf");
+    let target = dir.path().join("saved.pdf");
+    core.attachment_save(pdf, target.clone()).await.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"%PDF-1.4 test");
+    let source = dir.path().join("source.eml");
+    core.message_save_source(message, source.clone())
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&std::fs::read(&source).unwrap()).contains(&subject));
+    core.shutdown().await;
+}
+
 #[tokio::test]
 #[ignore = "needs the Stalwart container; runs in CI"]
 async fn t09_wrong_password_needs_attention_and_others_keep_working() {

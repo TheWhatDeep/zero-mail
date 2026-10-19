@@ -12,7 +12,7 @@ use mail_imap::{
 use mail_store::{
     Account, AccountId, Folder, FolderId, MessageId, PrefetchItem, SpecialUse, Store,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
@@ -43,10 +43,30 @@ impl<C, L> Clone for SyncDeps<C, L> {
     }
 }
 
+/// Where a job the user waits for sends its outcome. Dropped unanswered when the account is
+/// offline or the session ends, which the caller sees as a closed channel.
+struct Reply<T>(Option<oneshot::Sender<Result<T, SyncError>>>);
+
+impl<T> Reply<T> {
+    fn send(&mut self, result: Result<T, SyncError>) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(result);
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Reply<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Reply")
+    }
+}
+
 #[derive(Debug)]
 enum Command {
     Refresh(FolderId),
-    FetchBody(MessageId),
+    FetchBody(MessageId, Reply<()>),
+    /// A part's decoded bytes; an empty part id is the raw message source.
+    FetchPart(MessageId, String, Reply<Vec<u8>>),
     OpenFolder(Option<FolderId>),
     AccountChanged,
     Retry,
@@ -72,9 +92,31 @@ impl AccountHandle {
     }
 
     /// The user opened a message whose body is not cached: fetch it ahead of everything
-    /// else (section 6, step 8).
-    pub fn fetch_body(&self, message_id: MessageId) {
-        let _ = self.commands.send(Command::FetchBody(message_id));
+    /// else (section 6, step 8). The receiver gets the outcome, or closes when the account
+    /// is offline.
+    pub fn fetch_body(&self, message_id: MessageId) -> oneshot::Receiver<Result<(), SyncError>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .commands
+            .send(Command::FetchBody(message_id, Reply(Some(tx))));
+        rx
+    }
+
+    /// One body part, transfer-decoded (attachments, inline images), or with an empty
+    /// `part_id` the raw message source (Save source), fetched ahead of background work.
+    /// The receiver closes unanswered when the account is offline.
+    pub fn fetch_part(
+        &self,
+        message_id: MessageId,
+        part_id: &str,
+    ) -> oneshot::Receiver<Result<Vec<u8>, SyncError>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.commands.send(Command::FetchPart(
+            message_id,
+            part_id.to_string(),
+            Reply(Some(tx)),
+        ));
+        rx
     }
 
     /// The folder open in the UI: it syncs now and every 5 minutes while open.
@@ -164,7 +206,7 @@ enum Priority {
     Prefetch = 3,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Job {
     Sync(FolderId),
     Prefetch(FolderId),
@@ -174,7 +216,9 @@ enum Job {
         structure: Box<BodyPart>,
     },
     /// A body the user is waiting for.
-    Open(MessageId),
+    Open(MessageId, Reply<()>),
+    /// A part (or the source) the user is waiting for.
+    Part(MessageId, String, Reply<Vec<u8>>),
 }
 
 impl Job {
@@ -182,7 +226,8 @@ impl Job {
         match (self, other) {
             (Job::Sync(a), Job::Sync(b)) | (Job::Prefetch(a), Job::Prefetch(b)) => a == b,
             (Job::Body { item: a, .. }, Job::Body { item: b, .. }) => a.message_id == b.message_id,
-            (Job::Open(a), Job::Open(b)) => a == b,
+            (Job::Open(a, _), Job::Open(b, _)) => a == b,
+            (Job::Part(a, p, _), Job::Part(b, q, _)) => a == b && p == q,
             _ => false,
         }
     }
@@ -388,7 +433,8 @@ where
                     None | Some(Command::Shutdown) => return Wake::Shutdown,
                     Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                     Some(Command::OpenFolder(f)) => self.open_folder = f,
-                    Some(Command::Refresh(_) | Command::FetchBody(_)) => {}
+                    // Offline: the waiting caller's channel closes.
+                    Some(Command::Refresh(_) | Command::FetchBody(..) | Command::FetchPart(..)) => {}
                 },
             }
         }
@@ -401,7 +447,7 @@ where
                 None | Some(Command::Shutdown) => return Wake::Shutdown,
                 Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                 Some(Command::OpenFolder(f)) => self.open_folder = f,
-                Some(Command::Refresh(_) | Command::FetchBody(_)) => {}
+                Some(Command::Refresh(_) | Command::FetchBody(..) | Command::FetchPart(..)) => {}
             }
         }
     }
@@ -584,7 +630,10 @@ where
                     queue.push(Priority::User, Job::Sync(id));
                 }
             }
-            Command::FetchBody(id) => queue.push(Priority::User, Job::Open(id)),
+            Command::FetchBody(id, reply) => queue.push(Priority::User, Job::Open(id, reply)),
+            Command::FetchPart(id, part, reply) => {
+                queue.push(Priority::User, Job::Part(id, part, reply));
+            }
             Command::OpenFolder(f) => {
                 self.open_folder = f;
                 open_tick.reset();
@@ -720,38 +769,97 @@ async fn run_job<T: ImapTransport>(
                 Err(e) => return Err(e.into()),
             }
         }
-        Job::Open(message_id) => {
-            let message = ctx.store.get_message(message_id).await?;
-            if message.account_id != ctx.account_id
-                || message.body_state != mail_store::BodyState::None
-            {
-                return Ok(());
-            }
-            let folder = ctx.store.get_folder(message.folder_id).await?;
-            if !ensure_selected(t, &folder, selected, queue).await? {
-                return Ok(());
-            }
-            let headers = t
-                .uid_fetch_headers(&UidSet::single(message.uid), HeaderFetch::default())
-                .await?;
-            let Some(h) = headers.into_iter().next() else {
-                return Err(SyncError::Gone);
-            };
-            if let Some((body, state)) =
-                body::fetch_body(t, message.uid, &h.body, now(), body::Purpose::Open).await?
-            {
-                let preview = body::preview(&body.text_plain);
-                ctx.store
-                    .store_body(message_id, body, state, preview)
-                    .await?;
-                ctx.events.send(SyncEvent::StoreChanged {
-                    account_id: ctx.account_id,
-                    folder_id: Some(folder.id),
-                });
+        Job::Open(message_id, mut reply) => {
+            let result = open_body(t, ctx, selected, queue, message_id).await;
+            reply.send(result.clone());
+            result?;
+        }
+        Job::Part(message_id, part_id, mut reply) => {
+            let result = fetch_part(t, ctx, selected, queue, message_id, &part_id).await;
+            let failed = result.as_ref().err().cloned();
+            reply.send(result);
+            if let Some(e) = failed {
+                return Err(e);
             }
         }
     }
     Ok(())
+}
+
+/// Fetches and stores the body of a message the user opened.
+async fn open_body<T: ImapTransport>(
+    t: &mut T,
+    ctx: &Ctx<'_>,
+    selected: &mut Option<FolderId>,
+    queue: &mut Queue,
+    message_id: MessageId,
+) -> Result<(), SyncError> {
+    let message = ctx.store.get_message(message_id).await?;
+    if message.account_id != ctx.account_id || message.body_state != mail_store::BodyState::None {
+        return Ok(());
+    }
+    let folder = ctx.store.get_folder(message.folder_id).await?;
+    if !ensure_selected(t, &folder, selected, queue).await? {
+        return Err(SyncError::Gone);
+    }
+    let headers = t
+        .uid_fetch_headers(&UidSet::single(message.uid), HeaderFetch::default())
+        .await?;
+    let Some(h) = headers.into_iter().next() else {
+        return Err(SyncError::Gone);
+    };
+    if let Some((body, state)) =
+        body::fetch_body(t, message.uid, &h.body, now(), body::Purpose::Open).await?
+    {
+        let preview = body::preview(&body.text_plain);
+        ctx.store
+            .store_body(message_id, body, state, preview)
+            .await?;
+        ctx.events.send(SyncEvent::StoreChanged {
+            account_id: ctx.account_id,
+            folder_id: Some(folder.id),
+        });
+    }
+    Ok(())
+}
+
+/// One part, transfer-decoded, or with an empty `part_id` the raw source. The part's
+/// encoding comes from a fresh BODYSTRUCTURE, since the store keeps no encoding. Attachment
+/// bytes are fetched only here, on demand (section 8, invariant 3).
+async fn fetch_part<T: ImapTransport>(
+    t: &mut T,
+    ctx: &Ctx<'_>,
+    selected: &mut Option<FolderId>,
+    queue: &mut Queue,
+    message_id: MessageId,
+    part_id: &str,
+) -> Result<Vec<u8>, SyncError> {
+    let message = ctx.store.get_message(message_id).await?;
+    if message.account_id != ctx.account_id {
+        return Err(SyncError::Gone);
+    }
+    let folder = ctx.store.get_folder(message.folder_id).await?;
+    if !ensure_selected(t, &folder, selected, queue).await? {
+        return Err(SyncError::Gone);
+    }
+    if part_id.is_empty() {
+        return Ok(t.uid_fetch_part(message.uid, "", None).await?);
+    }
+    let headers = t
+        .uid_fetch_headers(&UidSet::single(message.uid), HeaderFetch::default())
+        .await?;
+    let Some(h) = headers.into_iter().next() else {
+        return Err(SyncError::Gone);
+    };
+    let encoding = h
+        .body
+        .leaves()
+        .iter()
+        .find(|p| p.part_id == part_id)
+        .map(|p| p.encoding.clone())
+        .ok_or(SyncError::Gone)?;
+    let raw = t.uid_fetch_part(message.uid, part_id, None).await?;
+    Ok(body::decode_transfer(&raw, encoding.as_deref()))
 }
 
 #[cfg(test)]

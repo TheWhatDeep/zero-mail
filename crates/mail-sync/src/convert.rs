@@ -264,6 +264,8 @@ mod tests {
             disposition: disposition.map(str::to_string),
             filename: filename.map(str::to_string),
             size: 100,
+            flowed: false,
+            delsp: false,
             children: Vec::new(),
         }
     }

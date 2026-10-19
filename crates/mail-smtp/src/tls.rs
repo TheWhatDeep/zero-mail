@@ -1,6 +1,7 @@
 //! TLS for SMTP. Kept in step with `mail-imap/src/net.rs`: the two crates may not depend on
 //! each other (section 3), so the verifier is repeated here.
 
+use crate::trace::{Direction, Trace};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -154,6 +155,8 @@ pub(crate) struct Prefixed {
     prefix: Vec<u8>,
     offset: usize,
     inner: TlsStream<TcpStream>,
+    /// The debug trace, when it was on at connect time (section 13, item 8).
+    trace: Option<Trace>,
 }
 
 impl Prefixed {
@@ -162,6 +165,7 @@ impl Prefixed {
             prefix,
             offset: 0,
             inner,
+            trace: Trace::new_if_enabled(),
         }
     }
 }
@@ -180,7 +184,12 @@ impl AsyncRead for Prefixed {
             this.offset += n;
             return Poll::Ready(Ok(()));
         }
-        Pin::new(&mut this.inner).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut this.inner).poll_read(cx, buf);
+        if let (Poll::Ready(Ok(())), Some(trace)) = (&poll, this.trace.as_mut()) {
+            trace.log(Direction::Server, &buf.filled()[before..]);
+        }
+        poll
     }
 }
 
@@ -190,7 +199,12 @@ impl AsyncWrite for Prefixed {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        let this = &mut *self;
+        let poll = Pin::new(&mut this.inner).poll_write(cx, buf);
+        if let (Poll::Ready(Ok(n)), Some(trace)) = (&poll, this.trace.as_mut()) {
+            trace.log(Direction::Client, &buf[..*n]);
+        }
+        poll
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {

@@ -153,12 +153,12 @@ async fn an_added_account_syncs_and_the_reader_commands_see_it() {
         view.body_url,
         format!("mail-body://localhost/{message}?images=0")
     );
-    let body = s.core.mail_body(message, false).await.unwrap();
+    let body = s.core.mail_body(message, "images=0").await.unwrap();
     assert_eq!(body.status, 200);
     let html = String::from_utf8(body.body).unwrap();
     assert!(html.contains("&lt;b&gt;not html&lt;/b&gt; &amp; line 1"));
     assert!(body.csp.starts_with("default-src 'none'"));
-    assert_eq!(s.core.mail_body(999, false).await.unwrap().status, 404);
+    assert_eq!(s.core.mail_body(999, "images=0").await.unwrap().status, 404);
 
     // Unified, search and thread scopes arrive in M9.
     let err = s

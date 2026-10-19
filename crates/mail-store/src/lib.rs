@@ -366,8 +366,28 @@ impl Store {
     }
 
     /// A message's attachment metadata (section 8: listed without downloading).
-    pub async fn list_attachments(&self, message_id: MessageId) -> Result<Vec<NewAttachment>> {
+    pub async fn list_attachments(&self, message_id: MessageId) -> Result<Vec<AttachmentRecord>> {
         self.read(move |conn| queries::list_attachments(conn, message_id))
+            .await
+    }
+
+    /// One attachment row.
+    pub async fn get_attachment(&self, attachment_id: AttachmentId) -> Result<AttachmentRecord> {
+        self.read(move |conn| queries::get_attachment(conn, attachment_id))
+            .await
+    }
+
+    /// Records Always load from this sender (section 8). Addresses compare
+    /// case-insensitively.
+    pub async fn allow_remote_images(&self, account_id: AccountId, sender: &str) -> Result<()> {
+        let sender = sender.to_string();
+        self.write(move |tx| queries::allow_remote_images(tx, account_id, &sender))
+            .await
+    }
+
+    pub async fn remote_images_allowed(&self, account_id: AccountId, sender: &str) -> Result<bool> {
+        let sender = sender.to_string();
+        self.read(move |conn| queries::remote_images_allowed(conn, account_id, &sender))
             .await
     }
 

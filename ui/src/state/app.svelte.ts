@@ -32,6 +32,8 @@ class AppState {
   /** Bumped on store-changed per folder; the list and reader re-query. */
   changes = $state<Record<string, number>>({});
   startError = $state<AppError | null>(null);
+  /** The real target of the link under the pointer in a message (section 11, status bar). */
+  hoveredLink = $state<string | null>(null);
 
   private unlisten: (() => void)[] = [];
   private nextToast = 1;

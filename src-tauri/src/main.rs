@@ -10,7 +10,12 @@
 //!
 //! Perf mode (`ZEROMAIL_PERF_OUT`, tests/perf/startup.mjs only) adds one runtime capability
 //! so the page can report its marks, and writes them to that file.
+//!
+//! The opener and dialog plugins are used from Rust only: `link.open`, `attachment.open`
+//! and `log.open` hand a checked URL or path to the OS, and Save as opens the native dialog
+//! when the page passes no path (SPEC_GAPS G52, G54). The page has no plugin permission.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -21,7 +26,9 @@ use mail_core::{
 };
 use tauri::http::{header, Response, StatusCode};
 use tauri::ipc::CapabilityBuilder;
-use tauri::{Emitter, Listener, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
 type AppCore = Core<ImapClient, SmtpClient, HttpClient>;
 
@@ -123,28 +130,126 @@ async fn message_open(
     core.0.message_open(message_id).await
 }
 
-/// `mail-body://localhost/<message>?images=0|1` (section 8, step 3). The CSP is a response
-/// header, never a meta tag.
-fn mail_body_request(uri: &tauri::http::Uri) -> Option<(i64, bool)> {
-    let id = uri.path().trim_matches('/').parse().ok()?;
-    let images = uri
-        .query()
-        .unwrap_or_default()
-        .split('&')
-        .any(|kv| kv == "images=1");
-    Some((id, images))
+#[tauri::command(rename_all = "snake_case")]
+async fn images_allow_once(
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+) -> Result<(), AppError> {
+    core.0.images_allow_once(message_id).await
 }
 
-fn respond(status: u16, csp: &str, body: Vec<u8>) -> Response<Vec<u8>> {
+#[tauri::command(rename_all = "snake_case")]
+async fn images_allow_sender(
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+) -> Result<(), AppError> {
+    core.0.images_allow_sender(message_id).await
+}
+
+fn os_error(e: impl std::fmt::Display) -> AppError {
+    AppError::new(ErrorCode::Io, e.to_string())
+}
+
+/// The native Save dialog, offering `name` (SPEC_GAPS G54). Closing it is `cancelled`.
+async fn save_dialog(app: &AppHandle, name: String) -> Result<PathBuf, AppError> {
+    let app = app.clone();
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_file_name(name).blocking_save_file()
+    })
+    .await
+    .map_err(os_error)?;
+    match chosen {
+        Some(path) => path.into_path().map_err(os_error),
+        None => Err(AppError::new(ErrorCode::Cancelled, "save cancelled")),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn attachment_open(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    attachment_id: i64,
+) -> Result<(), AppError> {
+    let path = core.0.attachment_open(attachment_id).await?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(os_error)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn attachment_save(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    attachment_id: i64,
+    path: Option<String>,
+) -> Result<(), AppError> {
+    let path = match path {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let name = core.0.attachment_file_name(attachment_id).await?;
+            save_dialog(&app, name).await?
+        }
+    };
+    core.0.attachment_save(attachment_id, path).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_save_source(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+    path: Option<String>,
+) -> Result<(), AppError> {
+    let path = match path {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let name = core.0.source_file_name(message_id).await?;
+            save_dialog(&app, name).await?
+        }
+    };
+    core.0.message_save_source(message_id, path).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn link_open(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    url: String,
+) -> Result<(), AppError> {
+    let url = core.0.link_check(&url)?;
+    app.opener().open_url(url, None::<&str>).map_err(os_error)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn log_open(app: AppHandle, core: tauri::State<'_, CoreState>) -> Result<(), AppError> {
+    let dir = core.0.log_dir();
+    std::fs::create_dir_all(&dir).map_err(os_error)?;
+    app.opener()
+        .open_path(dir.to_string_lossy(), None::<&str>)
+        .map_err(os_error)
+}
+
+/// `mail-body://localhost/<message>?images=0|1&plain=0|1` (section 8, step 3; SPEC_GAPS
+/// G53): the message id and the query. The CSP is a response header, never a meta tag.
+fn mail_body_request(uri: &tauri::http::Uri) -> Option<(i64, String)> {
+    let id = uri.path().trim_matches('/').parse().ok()?;
+    Some((id, uri.query().unwrap_or_default().to_string()))
+}
+
+fn respond(status: u16, content_type: &str, csp: &str, body: Vec<u8>) -> Response<Vec<u8>> {
     let built = Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CONTENT_TYPE, content_type)
         .header("Content-Security-Policy", csp)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::REFERRER_POLICY, "no-referrer")
         .header(header::CACHE_CONTROL, "no-store")
         .body(body);
     built.unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+fn reply(r: mail_core::BodyResponse) -> Response<Vec<u8>> {
+    respond(r.status, &r.content_type, &r.csp, r.body)
 }
 
 fn data_dir(app: &tauri::App) -> Result<std::path::PathBuf, AppError> {
@@ -202,8 +307,11 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
 fn main() {
     let started = Instant::now();
     let built = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
             let dir = data_dir(app)?;
+            mail_core::logging::init(&dir).map_err(os_error)?;
             let handle = app.handle().clone();
             let sink: EventSink = Arc::new(move |event: CoreEvent| {
                 let _ = handle.emit(event.name(), &event);
@@ -226,16 +334,33 @@ fn main() {
             let app = ctx.app_handle().clone();
             let target = mail_body_request(request.uri());
             tauri::async_runtime::spawn(async move {
-                let csp_none = "default-src 'none'";
-                let Some((id, images)) = target else {
-                    responder.respond(respond(400, csp_none, Vec::new()));
+                let Some((id, query)) = target else {
+                    responder.respond(reply(mail_core::empty_response(400)));
                     return;
                 };
                 let core = Arc::clone(&app.state::<CoreState>().0);
-                match core.mail_body(id, images).await {
-                    Ok(r) => responder.respond(respond(r.status, &r.csp, r.body)),
-                    Err(_) => responder.respond(respond(500, csp_none, Vec::new())),
+                match core.mail_body(id, &query).await {
+                    Ok(r) => responder.respond(reply(r)),
+                    Err(_) => responder.respond(reply(mail_core::empty_response(500))),
                 }
+            });
+        })
+        // Inline images of a message (section 8, Attachments).
+        .register_asynchronous_uri_scheme_protocol("mail-cid", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                let core = Arc::clone(&app.state::<CoreState>().0);
+                responder.respond(reply(core.mail_cid(&path).await));
+            });
+        })
+        // Remote images through the proxy, only once the CSP admits them (section 8).
+        .register_asynchronous_uri_scheme_protocol("mail-remote", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                let core = Arc::clone(&app.state::<CoreState>().0);
+                responder.respond(reply(core.mail_remote(&path).await));
             });
         })
         .invoke_handler(tauri::generate_handler![
@@ -250,6 +375,13 @@ fn main() {
             folder_refresh,
             list_page,
             message_open,
+            images_allow_once,
+            images_allow_sender,
+            attachment_open,
+            attachment_save,
+            message_save_source,
+            link_open,
+            log_open,
         ])
         .build(tauri::generate_context!());
 
@@ -281,18 +413,30 @@ mod tests {
             "http://mail-body.localhost/42?images=0",
         ] {
             let uri: tauri::http::Uri = url.parse().unwrap();
-            assert_eq!(mail_body_request(&uri), Some((42, false)));
+            assert_eq!(mail_body_request(&uri), Some((42, "images=0".to_string())));
         }
-        let uri: tauri::http::Uri = "mail-body://localhost/7?images=1".parse().unwrap();
-        assert_eq!(mail_body_request(&uri), Some((7, true)));
+        let uri: tauri::http::Uri = "mail-body://localhost/7?images=1&plain=1".parse().unwrap();
+        assert_eq!(
+            mail_body_request(&uri),
+            Some((7, "images=1&plain=1".to_string()))
+        );
         let uri: tauri::http::Uri = "mail-body://localhost/../etc".parse().unwrap();
         assert_eq!(mail_body_request(&uri), None);
     }
 
     #[test]
     fn responses_carry_the_csp_header() {
-        let r = respond(200, "default-src 'none'", b"x".to_vec());
+        let r = respond(
+            200,
+            "text/html; charset=utf-8",
+            "default-src 'none'",
+            b"x".to_vec(),
+        );
         assert_eq!(r.headers()["Content-Security-Policy"], "default-src 'none'");
+        assert_eq!(
+            r.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
         assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
         assert_eq!(r.status(), 200);
     }

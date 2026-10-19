@@ -153,14 +153,19 @@ export interface Page {
   next: Cursor | null;
 }
 
-export type BodyKind = "plain" | "plain_truncated" | "loading";
+/** HTML or plain text from mail-body; loading while it is fetched; unreadable when the
+ * server could not deliver it (Could not display this message, section 12). */
+export type BodyKind = "html" | "plain" | "loading" | "unreadable";
+
+export type RemoteImages = "none" | "blocked" | "allowed";
 
 export interface Attachment {
-  part_id: string;
+  id: number;
   filename: string;
   mime: string;
   size: number;
-  is_inline: boolean;
+  /** Open asks first (section 8). */
+  executable: boolean;
 }
 
 export interface MessageView {
@@ -176,9 +181,13 @@ export interface MessageView {
   unread: boolean;
   flagged: boolean;
   body_kind: BodyKind;
+  /** A text part was cut at 1 MB (section 12, Very large message). */
+  truncated: boolean;
+  /** The plain-text toggle applies (SPEC_GAPS G53). */
+  has_html: boolean;
   body_url: string;
   attachments: Attachment[];
-  remote_images: "none" | "blocked" | "allowed";
+  remote_images: RemoteImages;
 }
 
 const ERROR_CODES: readonly ErrorCode[] = [
@@ -239,6 +248,14 @@ export const commands = {
     call<null>("folder_refresh", { account_id, folder_id }),
   "list.page": (request: ListRequest) => call<Page>("list_page", { request }),
   "message.open": (message_id: number) => call<MessageView>("message_open", { message_id }),
+  "message.save_source": (message_id: number) => call<null>("message_save_source", { message_id, path: null }),
+  "images.allow_once": (message_id: number) => call<null>("images_allow_once", { message_id }),
+  "images.allow_sender": (message_id: number) => call<null>("images_allow_sender", { message_id }),
+  "attachment.open": (attachment_id: number) => call<null>("attachment_open", { attachment_id }),
+  /** With no path the app shows the native Save dialog (SPEC_GAPS G54). */
+  "attachment.save": (attachment_id: number) => call<null>("attachment_save", { attachment_id, path: null }),
+  "link.open": (url: string) => call<null>("link_open", { url }),
+  "log.open": () => call<null>("log_open"),
 } as const;
 
 /** Event payloads (section 3, event table). */

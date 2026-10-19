@@ -44,11 +44,31 @@ export const strings = {
   deleted: "This message was deleted.",
   bodyFrameTitle: "Message body",
   couldNotOpen: "Could not open this message.",
+  couldNotDisplay: "Could not display this message.",
+  saveSource: "Save source (.eml)",
+  showPlainText: "Plain text",
+  showFormatted: "Formatted",
+  imagesBlocked: "Images from the web are blocked in this message.",
+  loadImages: "Load images",
+  alwaysLoadImages: "Always load from this sender",
+  linkCheckTitle: "Check this link",
+  linkMismatch: (shown: string, real: string) =>
+    `This link shows ${shown} but goes to ${real}. Open it in your browser?`,
+  openLink: "Open link",
+  attachmentsLabel: "Attachments",
+  unnamedAttachment: "Unnamed attachment",
+  openAttachment: "Open",
+  saveAttachment: "Save as",
+  executableTitle: "Open a program file",
+  executableWarning: (name: string) => `${name} can run programs on this computer. Open it anyway?`,
+  openAnyway: "Open anyway",
 
   // Status bar
   statusLabel: "Sync status",
   pending: (n: number) => (n === 1 ? "1 change pending" : `${n} changes pending`),
   backoffWarning: (account: string, error: string) => `${account}: ${error}`,
+  openLog: "Open the log folder",
+  linkTarget: "Link target",
 
   // Banners
   offline: "Offline, changes will sync later.",

@@ -137,7 +137,16 @@ jobs:
       # little about a real display.
       - name: Measure startup and scrolling
         run: node tests/perf/startup.mjs --data tests/fixtures/generated/perf --runs 5 --scroll --enforce
+      # T19, webview half (SPEC_GAPS G56): every XSS corpus message opened in the release app
+      # with zero outbound requests.
+      - name: Generate the XSS fixture
+        run: cargo run --release -p mail-store --example xss_fixture -- tests/fixtures/generated/xss tests/fixtures/xss/corpus.html
+      - name: T19 harness (WebView2)
+        run: node tests/render/xss-harness.mjs --data tests/fixtures/generated/xss
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: startup-windows-2025
-          path: tests/perf/results/startup.json
+          path: |
+            tests/perf/results/startup.json
+            tests/render/results/xss.json

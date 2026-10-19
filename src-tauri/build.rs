@@ -14,6 +14,13 @@ const COMMANDS: &[&str] = &[
     "folder_refresh",
     "list_page",
     "message_open",
+    "images_allow_once",
+    "images_allow_sender",
+    "attachment_open",
+    "attachment_save",
+    "message_save_source",
+    "link_open",
+    "log_open",
 ];
 
 fn main() {

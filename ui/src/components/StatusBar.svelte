@@ -1,9 +1,10 @@
 <script lang="ts">
   // Status bar (section 11): one sync dot per account, the pending-change count when there
-  // is one (ops arrive in M6), and a warning when an account has been backing off for more
-  // than a minute, with its last error (section 11, States).
+  // is one (ops arrive in M6), a warning when an account has been backing off for more than
+  // a minute, with its last error, which opens the log (section 11, States), and the real
+  // target of the link under the pointer (section 8, Links).
   import { onMount } from "svelte";
-  import type { AccountState } from "../lib/ipc";
+  import { commands, type AccountState } from "../lib/ipc";
   import { BACKOFF_WARNING_MS, app } from "../state/app.svelte";
   import { errorText, stateText, strings } from "../strings";
 
@@ -41,10 +42,13 @@
     {/each}
   </ul>
   {#each warnings as a (a.id)}
-    <span class="warning" role="status">
+    <button class="warning" title={strings.openLog} onclick={() => void commands["log.open"]().catch(() => {})}>
       {strings.backoffWarning(a.name || a.email, a.last_error ? errorText[a.last_error.code] : stateText.backoff)}
-    </span>
+    </button>
   {/each}
+  {#if app.hoveredLink}
+    <span class="link" aria-label={strings.linkTarget}>{app.hoveredLink}</span>
+  {/if}
 </footer>
 
 <style>
@@ -99,6 +103,20 @@
   }
 
   .warning {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .link {
+    margin-left: auto;
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
