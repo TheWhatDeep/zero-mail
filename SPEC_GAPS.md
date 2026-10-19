@@ -202,3 +202,53 @@ An MX lookup needs a DNS crate, and none is approved. DNS-over-HTTPS would conta
 The owner amended A1: M2 to M10 run in three sessions, M2–M4, M5–M7 and M8–M10. Each milestone inside a session still ends with tests green, a `docs/REPORTS.md` entry and its own `m<N>` tag before the next one starts. A session stops at any open spec gap.
 
 G1 update (2026-10-19): the owner installed Rust (1.99.1, MSVC host) and the VS 2022 Build Tools. Docker is not installed locally, by the owner's choice; the Stalwart tests run in CI (GitHub's Linux runners), and the fake transport covers local runs.
+
+## G29. Autoconfig: which module, and which HTTP client — Resolved 2026-10-19: proposal accepted
+Section 5 resolves server settings through the domain's autoconfig URL and the Mozilla ISP database, and section 13 allows those hosts. But:
+- No section 3 module owns server-settings resolution.
+- Section 2 limits `reqwest` to the image proxy, the unsubscribe POST and the OAuth token endpoint ("only"). Autoconfig is not on that list.
+- The workspace enables `reqwest`'s `rustls` feature. In reqwest 0.13 that feature pulls in `aws-lc-rs`, a second crypto library that needs a C build, next to the `ring` provider the workspace's `rustls` already uses. The `rustls-no-provider` feature of the same crate avoids this: the client is given a rustls config that uses `ring`.
+
+Proposal:
+- Autoconfig lives in `mail-auth`. Auth already owns choosing the login method by host (section 5, step 3), and it will hold `reqwest` for the OAuth token endpoint in M8.
+- Account CRUD (`account.*`) lives in `mail-core`. It is the only crate that may call `store`, `secrets`, `imap` and `auth` together.
+- Section 2's `reqwest` row adds autoconfig lookups.
+- Lookups use HTTPS only: `https://autoconfig.<domain>/mail/config-v1.1.xml`, then `https://<domain>/.well-known/autoconfig/mail/config-v1.1.xml`, then `https://autoconfig.thunderbird.net/v1.1/<domain>`. No email address is sent, only the domain.
+- `reqwest` switches from the `rustls` feature to `rustls-no-provider`, so only `ring` is linked.
+
+## G30. Trusted roots for certificate verification — Resolved 2026-10-19: `rustls-platform-verifier`
+Section 5 requires certificate verification to be always on. `rustls` verifies against a root store, and no approved crate provides one.
+
+Proposal: add `rustls-platform-verifier`. It is already in the build as a dependency of `reqwest`'s rustls support. It verifies with the OS trust store (Windows CryptoAPI, macOS Security framework, Linux system roots), so a root the user or their company installed works as it does in a browser.
+- The alternative is `webpki-roots`, a bundled copy of Mozilla's root list. It goes stale between releases and ignores roots installed on the machine.
+- Pinning (section 5) is our own code on top of the verifier. With a pin set, only a leaf certificate whose SHA-256 matches is accepted. Without a pin, the platform verifier decides, and a failure reports the leaf certificate's SHA-256 so the UI can offer to pin it.
+
+## G31. TCP keepalive at 60 s needs `socket2` — Resolved 2026-10-19: `socket2` approved
+Section 12 requires TCP keepalive at 60 s on IDLE connections. tokio can switch keepalive on, but it cannot set the interval. The OS default is 2 hours on Windows and Linux. Setting the interval needs `socket2`, which is not approved. It is already in the build as a dependency of tokio, so it adds no code size.
+
+Proposal: approve `socket2` for this one use in `mail-imap`. The alternative is OS-default keepalive. Then the 30 min 30 s IDLE read timeout is the only dead-connection check.
+
+## G32. The SMTP half of Test connection in M2 — Resolved 2026-10-19: option (a)
+Section 5, step 4: Test connection is IMAP login plus `LIST`, and SMTP `EHLO` plus `AUTH`; the account saves only if both pass. M2 builds account CRUD, but `smtp` is M7.
+
+Options:
+- (a) M2 adds one function to `mail-smtp`: connect, `EHLO`, `AUTH`, `QUIT`, using `lettre`. Section 5 is met from M2 on. M7 builds submission on top of it.
+- (b) M2 tests IMAP only and records the SMTP half as deferred to M7.
+
+## G33. T09 at M2, before sync actors exist — Resolved 2026-10-19: split as proposed
+T09 is in M2's done-when: "Revoke the app password: the account goes to `NeedsAttention` with zero retries; other accounts keep syncing". Two problems:
+- Account states and actors arrive in M3.
+- The Stalwart test container's accounts are fixed in `config.toml`. A password cannot be revoked while it runs.
+
+Proposal:
+- **M2:**
+  - On the fake transport, the password is revoked while the session is connected, and the next login gets `auth_failed`.
+  - On Stalwart, an account is saved with a password that no longer matches.
+  - In both, exactly one login attempt is made, no retry follows, the error class is `NeedsAttention`, and a second account on the same server still logs in and lists.
+- **M3:** T09 runs again with actors: the account state becomes `NeedsAttention`, no reconnect timer starts, and the other account's actor keeps syncing.
+
+## G34. One certificate pin per account, and how the fingerprint reaches the UI — Resolved by interpretation (owner to ratify)
+Section 4 has one `accounts.pinned_cert_sha256` column, and section 5 says the user pins "the server certificate" per account. M2 reads this as follows:
+- The one pin applies to both the IMAP and the SMTP connection. The Stalwart test container uses one certificate for both, and so do most self-hosted servers.
+- Limit: a self-hosted pair whose IMAP and SMTP servers present two different self-signed certificates cannot be pinned. A second column would be a schema change.
+- `AppError` is fixed as `{ code, message, account_id? }`. For code `certificate`, `message` holds the presented leaf certificate's SHA-256 in lowercase hex (64 characters). That is what the UI shows under Review certificate and offers to pin.

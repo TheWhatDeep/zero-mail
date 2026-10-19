@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.8 (build-ready), amended 2026-10-19 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.9 (build-ready), amended 2026-10-19 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -102,7 +102,7 @@ Tauri 2 desktop app for Windows, macOS and Linux. Rust does all network, storage
 | Shell | Tauri 2.x | OS webview, no bundled browser. Capability file allows only the app's own commands. |
 | Backend | Rust stable, tokio | All I/O async with timeouts. |
 | IMAP | `async-imap` behind our own `ImapTransport` trait | Only the `imap` module imports the crate, so it can be swapped. |
-| TLS | `rustls` | No OpenSSL dependency. |
+| TLS | `rustls`, `rustls-platform-verifier` | No OpenSSL dependency. Certificates verify against the OS trust store; per-account pins on top (SPEC_GAPS G30). |
 | SMTP and MIME build | `lettre` (tokio, rustls) | One crate for submit and message building. |
 | MIME parse | `mail-parser` | Charset conversion included. |
 | HTML sanitizer | `ammonia` | Allowlist-based. |
@@ -111,8 +111,8 @@ Tauri 2 desktop app for Windows, macOS and Linux. Rust does all network, storage
 | OAuth | `oauth2` crate | PKCE, loopback redirect. Freshness waiver granted 2026-10-19 (SPEC_GAPS G12). |
 | Errors, logs | `thiserror`, `tracing`, `tracing-subscriber`, `tracing-appender` | No other logging or error crates. |
 | Serialization | `serde`, `serde_json` | IPC payloads and JSON columns. |
-| HTTP | `reqwest` (rustls, no default features) | Remote-image proxy, unsubscribe POST, OAuth token endpoint only. |
-| Small utilities | `uuid`, `sha2`, `rand`, `futures` | Message-ID, certificate pins, CSP nonces, async-imap streams. |
+| HTTP | `reqwest` (`rustls-no-provider`, no default features) | Remote-image proxy, unsubscribe POST, OAuth token endpoint and autoconfig lookups only (SPEC_GAPS G29). |
+| Small utilities | `uuid`, `sha2`, `rand`, `futures`, `socket2` | Message-ID, certificate pins, CSP nonces, async-imap streams, the 60 s TCP keepalive (SPEC_GAPS G31). |
 | Tauri plugins | Official only: notification, opener, dialog, single-instance, autostart, window-state | No shell or broad fs plugin. |
 | Frontend | Svelte 5, TypeScript strict, Vite, plain CSS variables | No component library, no icon font, no remotely loaded fonts. Geist (SIL OFL) ships as local font files. |
 | Tests | `cargo test`, Vitest, Stalwart in Docker | Stalwart is the integration IMAP/SMTP server. |
@@ -144,7 +144,7 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `secrets` | Keychain read and write | nothing | Return a secret to the UI or a log |
 | `imap` | Transport trait, command wrappers, capability detection, quirks | nothing | Touch the database |
 | `smtp` | Submission, outgoing MIME build | nothing | Touch the database |
-| `auth` | Password and XOAUTH2 login, token refresh, OAuth flow | `secrets` | Persist an access token |
+| `auth` | Password and XOAUTH2 login, token refresh, OAuth flow, server-settings resolution (autoconfig, SPEC_GAPS G29) | `secrets` | Persist an access token |
 | `sync` | Per-account actors, IDLE, backoff, applying server state to the store | `imap`, `store`, `auth` | Render or sanitize HTML |
 | `ops` | Pending-op queue: flags, moves, deletes, folder changes | `imap`, `store` | Block the UI |
 | `outbox` | Send queue, undo window, Sent copy, draft upload | `smtp`, `imap`, `store` | Retry a message already handed to SMTP |
@@ -256,7 +256,7 @@ An account is a server config plus a login method. Nothing else differs between 
 **Setup flow**
 
 1. The user enters an email address.
-2. Server settings resolve in this order: built-in table (Google, Fastmail, iCloud, Yahoo), the domain's own autoconfig URL, the Mozilla ISP database, then the manual form (SPEC_GAPS G27). Autoconfig XML is read by a small hand-written reader (G26). Online lookups send only the domain, and a setting turns them off.
+2. Server settings resolve in this order: built-in table (Google, Fastmail, iCloud, Yahoo), the domain's own autoconfig URL, the Mozilla ISP database, then the manual form (SPEC_GAPS G27). Autoconfig XML is read by a small hand-written reader (G26). Online lookups use HTTPS only and send only the domain, and a setting turns them off (G29).
 3. The app reads `CAPABILITY` and offers a login method: OAuth for Google hosts, password for everything else.
 4. Test connection: IMAP login plus `LIST`, SMTP `EHLO` plus `AUTH`. No message is sent. The account saves only if both pass, unless the user picks Save anyway.
 5. Folder roles come from SPECIAL-USE, then name heuristics. The user can override each.
@@ -655,8 +655,8 @@ Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mai
 | --- | --- | --- |
 | M0 | Repo, CI, Tauri shell, Stalwart test container, fake IMAP transport, perf harness, `tokens.css`, dependency freshness check | `cargo test` and `npm test` green in CI; harness measures startup |
 | M1 | `store`: schema, migrations, query API, FTS, writer and read pool | Migration test passes; keyset pagination test passes on a 50,000-row fixture |
-| M2 | `imap`, `secrets`, `auth` (password), account CRUD, autoconfig | Add an account against the container; `LIST` works; T09 |
-| M3 | `sync`: actors, folder order, folder procedure, IDLE, backoff | T01, T02, T04, T05 (list part), T07, T08 |
+| M2 | `imap`, `secrets`, `auth` (password), account CRUD, autoconfig, SMTP connection test (G32) | Add an account against the container; `LIST` works; T09 at the login level (G33) |
+| M3 | `sync`: actors, folder order, folder procedure, IDLE, backoff | T01, T02, T04, T05 (list part), T07, T08, T09 with actors (G33) |
 | M4 | UI shell, virtualized list, plain-text reader, sidebar, status bar | Real mail visible in the UI at 60 fps scroll |
 | M5 | `render`: parser, sanitizer, protocols, attachments | T19 to T24 |
 | M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks | T03, T06, T25 to T28 |
@@ -760,6 +760,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.9 | 2026-10-19 | Owner decisions (SPEC_GAPS G29 to G33): autoconfig in `auth` over `reqwest` (HTTPS, domain only, `ring` provider); `rustls-platform-verifier` for trusted roots; `socket2` for the 60 s keepalive; M2 includes the SMTP half of Test connection; T09 split between M2 (login level) and M3 (actors). |
 | v0.8 | 2026-10-19 | Owner decisions (SPEC_GAPS G18, G19, G24 to G28): AppError code list; `\Deleted` is flags bit 5; Windows-only builds until M11 with Stalwart on Linux; manual tests wait until M10 is done, except T31 and T32 at M8; hand-written autoconfig XML reader; MX-host guess dropped; M2 to M10 in three sessions. |
 | v0.7 | 2026-10-19 | Owner decisions (SPEC_GAPS G2 to G14): name Zero Mail; Geist bundled locally; opaque surfaces instead of window vibrancy; dark tokens derived from the zinc ramp; design extras outside the spec dropped and spec shortcuts kept; Undo toast 10 s; motion limited to fades and pop-ins; glue crates added to section 2; oauth2 freshness waiver; fake transport behind a cargo feature. |
 | v0.6 | 2026-10-18 | Build-ready. Section 18 schema and commands merged into sections 3 and 4. Scale resolved as assumption 13. App name is the one open question, with a placeholder identifier so M0 can start. BUILD.md exported with Part A for Claude Code. |
