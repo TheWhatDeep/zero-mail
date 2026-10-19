@@ -10,3 +10,11 @@ workspace = true
 
 [dependencies]
 mail-secrets.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mail-secrets = { workspace = true, features = ["fake"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -65,6 +65,13 @@ pub struct ConnectConfig {
 pub trait ImapConnector: Send + Sync {
     type Transport: ImapTransport;
 
+    /// TLS (or required STARTTLS) and the capabilities advertised before login, then
+    /// LOGOUT. Used to offer a login method during setup (section 5, step 3).
+    fn probe(
+        &self,
+        config: &ConnectConfig,
+    ) -> impl Future<Output = Result<Capabilities, ImapError>> + Send;
+
     /// TLS (or required STARTTLS), then login. Fails with a `NeedsAttention` class error on a
     /// bad login or certificate.
     fn connect(

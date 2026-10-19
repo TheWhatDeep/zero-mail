@@ -8,4 +8,19 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compiles the scripted fake (src/fake.rs) for other crates' tests. Only ever enabled from
+# [dev-dependencies].
+fake = []
+
 [dependencies]
+lettre = { workspace = true, features = ["tokio1", "smtp-transport"] }
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync"] }
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "macros"] }

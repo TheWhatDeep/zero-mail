@@ -28,6 +28,7 @@ use crate::ImapError;
 /// The operation a [`Call`] or a scripted failure refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
+    Probe,
     Connect,
     List,
     Select,
@@ -436,6 +437,11 @@ impl FakeServer {
 
 impl ImapConnector for FakeServer {
     type Transport = FakeTransport;
+
+    async fn probe(&self, _config: &ConnectConfig) -> Result<Capabilities, ImapError> {
+        self.begin(Op::Probe, None, &UidSet::default(), "")?;
+        Ok(self.lock().caps.clone())
+    }
 
     async fn connect(
         &self,

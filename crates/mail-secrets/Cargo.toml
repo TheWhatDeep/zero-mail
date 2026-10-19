@@ -8,4 +8,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compiles the in-memory store (src/memory.rs) for other crates' tests, where no OS
+# keychain is available (the Linux CI runner). Only ever enabled from [dev-dependencies].
+fake = []
+
 [dependencies]
+keyring.workspace = true
+thiserror.workspace = true

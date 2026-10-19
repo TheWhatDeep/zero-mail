@@ -18,3 +18,13 @@ mail-sync.workspace = true
 mail-outbox.workspace = true
 mail-render.workspace = true
 mail-search.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+mail-imap = { workspace = true, features = ["fake"] }
+mail-secrets = { workspace = true, features = ["fake"] }
+mail-smtp = { workspace = true, features = ["fake"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

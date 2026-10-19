@@ -154,6 +154,56 @@ impl Store {
             .await
     }
 
+    /// Inserts an account with its first identity in one transaction (section 5).
+    pub async fn add_account(
+        &self,
+        account: NewAccount,
+        identity: NewIdentity,
+    ) -> Result<(AccountId, IdentityId)> {
+        self.write(move |tx| queries::add_account(tx, &account, &identity))
+            .await
+    }
+
+    pub async fn get_account(&self, account_id: AccountId) -> Result<Account> {
+        self.read(move |conn| queries::get_account(conn, account_id))
+            .await
+    }
+
+    /// Every account, oldest first.
+    pub async fn list_accounts(&self) -> Result<Vec<Account>> {
+        self.read(queries::list_accounts).await
+    }
+
+    /// Replaces an account's columns (`account.update`).
+    pub async fn update_account(&self, account_id: AccountId, account: NewAccount) -> Result<()> {
+        self.write(move |tx| queries::update_account(tx, account_id, &account))
+            .await
+    }
+
+    pub async fn set_account_enabled(&self, account_id: AccountId, enabled: bool) -> Result<()> {
+        self.write(move |tx| queries::set_account_enabled(tx, account_id, enabled))
+            .await
+    }
+
+    /// An account's identities, the default first.
+    pub async fn list_identities(&self, account_id: AccountId) -> Result<Vec<Identity>> {
+        self.read(move |conn| queries::list_identities(conn, account_id))
+            .await
+    }
+
+    /// A setting's JSON value, or `None` when it was never set.
+    pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        let key = key.to_string();
+        self.read(move |conn| queries::get_setting(conn, &key))
+            .await
+    }
+
+    pub async fn set_setting(&self, key: &str, value: serde_json::Value) -> Result<()> {
+        let key = key.to_string();
+        self.write(move |tx| queries::set_setting(tx, &key, &value))
+            .await
+    }
+
     /// Removes an account and every row that belongs to it.
     pub async fn delete_account(&self, account_id: AccountId) -> Result<()> {
         self.write(move |tx| queries::delete_account(tx, account_id))

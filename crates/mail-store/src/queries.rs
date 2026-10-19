@@ -38,6 +38,171 @@ pub(crate) fn insert_account(tx: &Transaction, a: &NewAccount) -> Result<Account
     Ok(tx.last_insert_rowid())
 }
 
+/// An account and its first identity, in one transaction: every account has at least one
+/// identity (section 5).
+pub(crate) fn add_account(
+    tx: &Transaction,
+    a: &NewAccount,
+    identity: &NewIdentity,
+) -> Result<(AccountId, IdentityId)> {
+    let account_id = insert_account(tx, a)?;
+    let identity_id = insert_identity(tx, account_id, identity)?;
+    Ok((account_id, identity_id))
+}
+
+pub(crate) fn insert_identity(
+    tx: &Transaction,
+    account_id: AccountId,
+    i: &NewIdentity,
+) -> Result<IdentityId> {
+    tx.execute(
+        "INSERT INTO identities (account_id, name, address, reply_to, is_default)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![account_id, i.name, i.address, i.reply_to, i.is_default],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+/// Replaces every column of an account except its id.
+pub(crate) fn update_account(tx: &Transaction, id: AccountId, a: &NewAccount) -> Result<()> {
+    let updated = tx.execute(
+        "UPDATE accounts SET name = ?2, email = ?3, imap_host = ?4, imap_port = ?5,
+             imap_security = ?6, smtp_host = ?7, smtp_port = ?8, smtp_security = ?9,
+             username = ?10, auth_kind = ?11, oauth_client_id = ?12, pinned_cert_sha256 = ?13,
+             sync_days = ?14, save_sent_copy = ?15, signature_html = ?16, signature_text = ?17,
+             enabled = ?18, created_at = ?19
+         WHERE id = ?1",
+        params![
+            id,
+            a.name,
+            a.email,
+            a.imap_host,
+            a.imap_port,
+            a.imap_security.as_sql(),
+            a.smtp_host,
+            a.smtp_port,
+            a.smtp_security.as_sql(),
+            a.username,
+            a.auth_kind.as_sql(),
+            a.oauth_client_id,
+            a.pinned_cert_sha256,
+            a.sync_days,
+            a.save_sent_copy.as_sql(),
+            a.signature_html,
+            a.signature_text,
+            a.enabled,
+            a.created_at,
+        ],
+    )?;
+    match updated {
+        0 => Err(StoreError::NotFound),
+        _ => Ok(()),
+    }
+}
+
+pub(crate) fn set_account_enabled(tx: &Transaction, id: AccountId, enabled: bool) -> Result<()> {
+    match tx.execute(
+        "UPDATE accounts SET enabled = ?2 WHERE id = ?1",
+        params![id, enabled],
+    )? {
+        0 => Err(StoreError::NotFound),
+        _ => Ok(()),
+    }
+}
+
+const ACCOUNT_COLUMNS: &str = "id, name, email, imap_host, imap_port, imap_security, smtp_host,
+    smtp_port, smtp_security, username, auth_kind, oauth_client_id, pinned_cert_sha256,
+    sync_days, save_sent_copy, signature_html, signature_text, enabled, created_at";
+
+/// Reads an enumerated text column, rejecting values the schema's CHECK would not allow.
+fn enum_column<T>(r: &Row, i: usize, parse: fn(&str) -> Option<T>) -> rusqlite::Result<T> {
+    let text: String = r.get(i)?;
+    parse(&text).ok_or(rusqlite::Error::InvalidColumnType(
+        i,
+        text,
+        rusqlite::types::Type::Text,
+    ))
+}
+
+fn account_row(r: &Row) -> rusqlite::Result<Account> {
+    Ok(Account {
+        id: r.get(0)?,
+        config: NewAccount {
+            name: r.get(1)?,
+            email: r.get(2)?,
+            imap_host: r.get(3)?,
+            imap_port: r.get(4)?,
+            imap_security: enum_column(r, 5, Security::from_sql)?,
+            smtp_host: r.get(6)?,
+            smtp_port: r.get(7)?,
+            smtp_security: enum_column(r, 8, Security::from_sql)?,
+            username: r.get(9)?,
+            auth_kind: enum_column(r, 10, AuthKind::from_sql)?,
+            oauth_client_id: r.get(11)?,
+            pinned_cert_sha256: r.get(12)?,
+            sync_days: r.get(13)?,
+            save_sent_copy: enum_column(r, 14, SaveSentCopy::from_sql)?,
+            signature_html: r.get(15)?,
+            signature_text: r.get(16)?,
+            enabled: r.get(17)?,
+            created_at: r.get(18)?,
+        },
+    })
+}
+
+pub(crate) fn get_account(conn: &Connection, id: AccountId) -> Result<Account> {
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts WHERE id = ?1");
+    Ok(conn.query_row(&sql, [id], account_row)?)
+}
+
+pub(crate) fn list_accounts(conn: &Connection) -> Result<Vec<Account>> {
+    let sql = format!("SELECT {ACCOUNT_COLUMNS} FROM accounts ORDER BY id");
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map([], account_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn list_identities(conn: &Connection, account_id: AccountId) -> Result<Vec<Identity>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, account_id, name, address, reply_to, is_default FROM identities
+         WHERE account_id = ?1 ORDER BY is_default DESC, id",
+    )?;
+    let rows = stmt.query_map([account_id], |r| {
+        Ok(Identity {
+            id: r.get(0)?,
+            account_id: r.get(1)?,
+            identity: NewIdentity {
+                name: r.get(2)?,
+                address: r.get(3)?,
+                reply_to: r.get(4)?,
+                is_default: r.get(5)?,
+            },
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn get_setting(conn: &Connection, key: &str) -> Result<Option<serde_json::Value>> {
+    let mut stmt = conn.prepare_cached("SELECT value_json FROM settings WHERE key = ?1")?;
+    let mut rows = stmt.query([key])?;
+    match rows.next()? {
+        Some(row) => {
+            let text: String = row.get(0)?;
+            Ok(Some(serde_json::from_str(&text)?))
+        }
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn set_setting(tx: &Transaction, key: &str, value: &serde_json::Value) -> Result<()> {
+    tx.execute(
+        "INSERT INTO settings (key, value_json) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json",
+        params![key, serde_json::to_string(value)?],
+    )?;
+    Ok(())
+}
+
 /// Removes the account and, by cascade, every row that belongs to it.
 pub(crate) fn delete_account(tx: &Transaction, account_id: AccountId) -> Result<()> {
     match tx.execute("DELETE FROM accounts WHERE id = ?1", [account_id])? {

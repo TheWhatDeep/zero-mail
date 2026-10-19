@@ -88,10 +88,20 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable, 2026-10-01
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Built before the container starts, so its start-up overlaps nothing slow.
+      - name: Build container-backed tests
+        run: cargo test -p mail-core --test stalwart --no-run
       - name: Start Stalwart
         run: docker compose -f tests/docker/compose.yml up -d --wait
       - name: Smoke check
         run: node tests/docker/smoke.mjs
+      # Tests that need the container are #[ignore]d everywhere else (SPEC_GAPS G24).
+      - name: Container-backed tests
+        run: cargo test -p mail-core --test stalwart -- --ignored --test-threads=1
       - name: Stalwart logs
         if: failure()
         run: docker compose -f tests/docker/compose.yml logs

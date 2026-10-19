@@ -20,7 +20,7 @@ edition = "2021"
 license = "UNLICENSED"
 publish = false
 
-# Every third-party crate the spec allows (BUILD.md section 2, v0.7). Versions are the
+# Every third-party crate the spec allows (BUILD.md section 2, v0.9). Versions are the
 # freshness-checked releases from SPEC_GAPS G12; Cargo.lock pins the exact build.
 # A crate is added to a member's [dependencies] only in the milestone that uses it.
 [workspace.dependencies]
@@ -41,6 +41,8 @@ tokio = { version = "1.53.3", default-features = false }
 async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12", "ring", "logging"] }
+# OS trust store for certificate verification (v0.9, SPEC_GAPS G30).
+rustls-platform-verifier = { version = "0.7.1" }
 lettre = { version = "0.11.23", default-features = false }
 mail-parser = { version = "0.11.9" }
 ammonia = { version = "4.2.4" }
@@ -63,11 +65,15 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154" }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "std"] }
 tracing-appender = { version = "0.2.5" }
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+# rustls-no-provider: the client is handed a rustls config on the ring provider, so aws-lc-rs
+# is never linked (v0.9, SPEC_GAPS G29).
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 sha2 = { version = "0.11.1" }
 rand = { version = "0.10.3" }
 futures = { version = "0.3.34", default-features = false, features = ["std"] }
+# The 60 s TCP keepalive on IMAP connections (v0.9, SPEC_GAPS G31).
+socket2 = { version = "0.6.5" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

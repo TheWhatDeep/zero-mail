@@ -6,6 +6,7 @@ pub type AccountId = i64;
 pub type FolderId = i64;
 pub type ThreadId = i64;
 pub type MessageId = i64;
+pub type IdentityId = i64;
 
 /// Transport security for an endpoint. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,14 @@ pub enum Security {
 }
 
 impl Security {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "tls" => Some(Self::Tls),
+            "starttls" => Some(Self::StartTls),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Tls => "tls",
@@ -30,6 +39,14 @@ pub enum AuthKind {
 }
 
 impl AuthKind {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "password" => Some(Self::Password),
+            "oauth_google" => Some(Self::OauthGoogle),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Password => "password",
@@ -46,6 +63,15 @@ pub enum SaveSentCopy {
 }
 
 impl SaveSentCopy {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -160,6 +186,29 @@ pub struct NewAccount {
     pub signature_text: String,
     pub enabled: bool,
     pub created_at: i64,
+}
+
+/// A stored account. Secrets are not here; the keychain holds them by account id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    pub id: AccountId,
+    pub config: NewAccount,
+}
+
+/// Columns of a new `identities` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewIdentity {
+    pub name: String,
+    pub address: String,
+    pub reply_to: Option<String>,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identity {
+    pub id: IdentityId,
+    pub account_id: AccountId,
+    pub identity: NewIdentity,
 }
 
 /// A folder as `LIST` reports it, before it is first selected.
