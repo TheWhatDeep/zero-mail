@@ -517,10 +517,7 @@ async fn t20_remote_images_load_only_after_consent_through_the_proxy() {
     }
     assert!(heads[1].starts_with("GET /pixel.gif?u=42 "), "{}", heads[1]);
     let more = message_id(&s, "more").await;
-    assert_eq!(
-        s.core.message_open(more).await.unwrap().remote_images,
-        RemoteImages::Blocked
-    );
+    assert_eq!(open(&s, more).await.remote_images, RemoteImages::Blocked);
 
     // Always load from this sender persists across restarts; allow-once does not.
     s.core.images_allow_sender(more).await.unwrap();
@@ -532,14 +529,14 @@ async fn t20_remote_images_load_only_after_consent_through_the_proxy() {
     for subject in ["news", "more"] {
         let id = message_id(&again, subject).await;
         assert_eq!(
-            again.core.message_open(id).await.unwrap().remote_images,
+            open(&again, id).await.remote_images,
             RemoteImages::Allowed,
             "{subject}"
         );
     }
     let other = message_id(&again, "other").await;
     assert_eq!(
-        again.core.message_open(other).await.unwrap().remote_images,
+        open(&again, other).await.remote_images,
         RemoteImages::Blocked
     );
     again.core.shutdown().await;
