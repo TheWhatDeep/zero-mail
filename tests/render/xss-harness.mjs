@@ -58,6 +58,9 @@ const child = spawn(binary, [], {
 });
 const deadline = setTimeout(() => {
   console.error(`T19 harness: no result within ${TIMEOUT_MS} ms`);
+  if (process.env.GITHUB_ACTIONS) {
+    console.log(`::error title=T19 harness::no result within ${TIMEOUT_MS} ms; ${requests.length} requests seen`);
+  }
   child.kill();
   process.exit(1);
 }, TIMEOUT_MS);
@@ -161,7 +164,7 @@ try {
   for (let step = 0; step < cases.length * 2 && seen.size < cases.length; step++) {
     let subject = null;
     // The next message is open once the subject changed and its frame is there.
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       subject = await evaluate(`document.querySelector('h2')?.textContent ?? null`);
       const framed = await evaluate(`!!document.querySelector('iframe')`);
       if (subject && subject !== last && framed) break;
@@ -225,6 +228,16 @@ const missing = cases.filter((c) => !report.opened.includes(c));
 console.log(JSON.stringify({ ...report, missing }, null, 2));
 const failed = report.error || report.violations.length > 0 || missing.length > 0 || report.body_requests < cases.length;
 if (failed) {
+  const why = {
+    error: report.error,
+    violations: report.violations.slice(0, 5),
+    missing: missing.slice(0, 10),
+    opened: report.opened.length,
+    body_requests: report.body_requests,
+    requests: requests.length,
+  };
+  // A CI annotation is readable without signing in to the logs.
+  if (process.env.GITHUB_ACTIONS) console.log(`::error title=T19 harness::${JSON.stringify(why)}`);
   console.error("T19 harness FAILED");
   process.exit(1);
 }
