@@ -53,6 +53,9 @@ const child = spawn(binary, [], {
     ...process.env,
     ZEROMAIL_DATA_DIR: appData,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+    // Its own WebView2 profile: a browser process left over from an earlier launch (the
+    // perf runs) would otherwise be reused and ignore the DevTools argument.
+    WEBVIEW2_USER_DATA_FOLDER: join(dir, "webview2"),
   },
   stdio: "ignore",
 });
@@ -86,7 +89,7 @@ async function enable(sessionId) {
 }
 
 async function connect() {
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 300; i++) {
     try {
       const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
       return version.webSocketDebuggerUrl;
