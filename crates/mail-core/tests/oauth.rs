@@ -292,15 +292,32 @@ impl Setup {
     }
 }
 
-fn file_contains(dir: &TempDir, needle: &str) -> bool {
-    std::fs::read_dir(dir.path()).unwrap().any(|e| {
-        let path = e.unwrap().path();
-        path.is_file()
-            && std::fs::read(&path)
-                .unwrap()
-                .windows(needle.len())
-                .any(|w| w == needle.as_bytes())
-    })
+/// Whether any file of the data folder holds `needle`. On Windows a file SQLite still has
+/// open is locked; the read is retried until the last connection has closed.
+async fn file_contains(dir: &TempDir, needle: &str) -> bool {
+    let start = Instant::now();
+    loop {
+        let mut found = false;
+        let mut locked = false;
+        for e in std::fs::read_dir(dir.path()).unwrap() {
+            let path = e.unwrap().path();
+            if !path.is_file() {
+                continue;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => found |= bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                Err(_) => locked = true,
+            }
+        }
+        if !locked {
+            return found;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "data folder still locked"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn message(subject: &str) -> FakeMessage {
@@ -399,15 +416,16 @@ async fn t31_save_sign_in_sync_and_send_over_xoauth2() {
         s.secrets.get(&k("refresh_token")).unwrap(),
         Some(Secret::new(REFRESH_1))
     );
-    s.core.shutdown().await;
-    for secret in [ACCESS_1, REFRESH_1, CLIENT_SECRET] {
-        assert!(
-            !file_contains(&dir, secret),
-            "{secret} reached the data folder"
-        );
-    }
     for key in s.secrets.keys() {
         assert_ne!(s.secrets.get(&key).unwrap(), Some(Secret::new(ACCESS_1)));
+    }
+    s.core.shutdown().await;
+    drop(s);
+    for secret in [ACCESS_1, REFRESH_1, CLIENT_SECRET] {
+        assert!(
+            !file_contains(&dir, secret).await,
+            "{secret} reached the data folder"
+        );
     }
 }
 
