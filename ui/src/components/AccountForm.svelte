@@ -4,6 +4,9 @@
   // Test connection, and Save once both halves pass, or Save anyway. A certificate the
   // system does not trust is shown with its fingerprint and can be pinned (section 5,
   // Certificates). Edit mode is the same form; it is how the user signs in again.
+  // Google sign-in (section 5; SPEC_GAPS G70, G71): the user's own client ID and secret; the
+  // account is saved, then the browser opens, and oauth-done closes the form or says why not.
+  // Cancelling a new form after it saved the account removes that account again.
   import { untrack } from "svelte";
   import FolderSettings from "./FolderSettings.svelte";
   import Identities from "./Identities.svelte";
@@ -21,7 +24,17 @@
     type FieldError,
     type FormFields,
   } from "../lib/accountForm";
-  import { commands, toAppError, type AccountView, type AppError, type Candidate, type Security, type TestReport } from "../lib/ipc";
+  import {
+    commands,
+    on,
+    toAppError,
+    type AccountView,
+    type AppError,
+    type AuthKind,
+    type Candidate,
+    type Security,
+    type TestReport,
+  } from "../lib/ipc";
   import { app } from "../state/app.svelte";
   import { errorText, strings } from "../strings";
 
@@ -34,7 +47,11 @@
   let fields = $state<FormFields>(initial ? fromSummary(initial) : emptyFields());
   let candidate = $state<Candidate | null>(null);
   let found = $state<boolean | null>(null);
-  let busy = $state<"resolve" | "test" | "save" | "remove" | null>(null);
+  let busy = $state<"resolve" | "test" | "save" | "remove" | "signin" | null>(null);
+  /** A new Google account this form saved before its sign-in finished (G71). */
+  let created = $state<number | null>(null);
+  /** The account whose browser sign-in is under way. */
+  let waiting = $state<number | null>(null);
   let report = $state<TestReport | null>(null);
   let error = $state<AppError | null>(initial?.last_error ?? null);
   let confirmRemove = $state(false);
@@ -44,7 +61,31 @@
   const pinOffer = $derived(
     certificateToPin(report?.imap_error, report?.smtp_error, candidate?.probe_error, error),
   );
-  const oauthOnly = $derived(candidate !== null && candidate.auth_methods.length > 0 && !candidate.auth_methods.includes("password"));
+  const google = $derived(fields.method === "oauth_google");
+  const methods = $derived<AuthKind[]>(!editing && candidate !== null ? candidate.auth_methods : []);
+
+  $effect(() => {
+    let off: (() => void) | null = null;
+    let stopped = false;
+    void on("oauth-done", (p) => {
+      if (p.account_id !== waiting) return;
+      waiting = null;
+      busy = null;
+      if (p.ok) {
+        app.form = null;
+        void app.reloadAccounts();
+      } else {
+        error = p.error;
+      }
+    }).then((unlisten) => {
+      if (stopped) unlisten();
+      else off = unlisten;
+    });
+    return () => {
+      stopped = true;
+      off?.();
+    };
+  });
 
   function invalid(f: FieldError): boolean {
     return showErrors && problems.includes(f);
@@ -105,6 +146,42 @@
     }
   }
 
+  /** Saves the account (new, or edited), then opens Google's consent page (G71). */
+  async function signIn(): Promise<void> {
+    showErrors = true;
+    if (problems.length > 0) return;
+    busy = "signin";
+    error = null;
+    try {
+      let id = initial?.id ?? created;
+      if (id === null) {
+        id = (await commands["account.add"](toConfig(fields, false))).id;
+        created = id;
+      } else {
+        await commands["account.update"](id, toConfig(fields, false));
+      }
+      waiting = id;
+      await commands["account.oauth_start"](id);
+    } catch (err) {
+      error = toAppError(err);
+      waiting = null;
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function cancel(): Promise<void> {
+    if (created !== null) {
+      try {
+        await commands["account.remove"](created);
+      } catch {
+        // Removing failed; the account stays and shows Sign in again.
+        await app.reloadAccounts();
+      }
+    }
+    app.form = null;
+  }
+
   async function remove(): Promise<void> {
     if (!initial) return;
     busy = "remove";
@@ -157,16 +234,29 @@
       </label>
       <div class="actions">
         {#if cancellable}
-          <button type="button" class="button secondary tint press" onclick={() => (app.form = null)}>{strings.cancel}</button>
+          <button type="button" class="button secondary tint press" onclick={cancel}>{strings.cancel}</button>
         {/if}
         <button type="submit" class="button primary press" disabled={busy !== null} onclick={resolve}>
           {busy === "resolve" ? strings.lookingUp : strings.continue}
         </button>
       </div>
     {:else}
-      {#if found === true}<p class="hint">{strings.foundHint}</p>{/if}
+      {#if found === true}<p class="hint">{google ? strings.foundHintGoogle : strings.foundHint}</p>{/if}
       {#if found === false}<p class="hint">{strings.manualHint}</p>{/if}
-      {#if oauthOnly}<p class="hint">{strings.oauthLater}</p>{/if}
+      {#if methods.length > 1}
+        <label class="field">
+          <span>{strings.methodLabel}</span>
+          <select
+            value={fields.method}
+            disabled={created !== null}
+            onchange={(e) => (fields.method = (e.currentTarget as HTMLSelectElement).value as AuthKind)}
+          >
+            {#each methods as m (m)}
+              <option value={m}>{m === "oauth_google" ? strings.methodGoogle : strings.methodPassword}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
 
       <div class="row2">
         <label class="field">
@@ -216,17 +306,38 @@
           <span>{strings.usernameLabel}</span>
           <input type="text" spellcheck="false" autocomplete="username" bind:value={fields.username} aria-invalid={invalid("username")} />
         </label>
+        {#if google}
+          <label class="field">
+            <span>{strings.clientIdLabel}</span>
+            <input type="text" spellcheck="false" bind:value={fields.clientId} aria-invalid={invalid("clientId")} />
+          </label>
+        {:else}
+          <label class="field">
+            <span>{strings.passwordLabel}</span>
+            <input
+              type="password"
+              autocomplete={editing ? "current-password" : "new-password"}
+              placeholder={editing ? strings.passwordKeep : ""}
+              bind:value={fields.password}
+              aria-invalid={invalid("password")}
+            />
+          </label>
+        {/if}
+      </div>
+      {#if google}
         <label class="field">
-          <span>{strings.passwordLabel}</span>
+          <span>{strings.clientSecretLabel}</span>
           <input
             type="password"
-            autocomplete={editing ? "current-password" : "new-password"}
-            placeholder={editing ? strings.passwordKeep : ""}
-            bind:value={fields.password}
-            aria-invalid={invalid("password")}
+            autocomplete="off"
+            placeholder={editing ? strings.clientSecretKeep : ""}
+            bind:value={fields.clientSecret}
+            aria-invalid={invalid("clientSecret")}
           />
         </label>
-      </div>
+        <p class="hint">{strings.oauthHint}</p>
+        {#if waiting !== null}<p class="hint" role="status">{strings.oauthWaiting}</p>{/if}
+      {/if}
 
       {#if pinOffer && fields.pin !== pinOffer}
         <div class="certificate" role="alert" transition:pop>
@@ -271,19 +382,30 @@
         {/if}
         <span class="grow"></span>
         {#if cancellable}
-          <button type="button" class="button secondary tint press" onclick={() => (app.form = null)}>{strings.cancel}</button>
+          <button type="button" class="button secondary tint press" onclick={cancel}>{strings.cancel}</button>
         {/if}
-        <button type="button" class="button secondary tint press" disabled={busy !== null} onclick={test}>
-          {busy === "test" ? strings.testing : strings.test}
-        </button>
-        {#if report && !passed(report)}
-          <button type="button" class="button secondary tint press" disabled={busy !== null} onclick={() => save(true)}>
-            {strings.saveAnyway}
+        {#if google}
+          {#if editing}
+            <button type="button" class="button secondary tint press" disabled={busy !== null} onclick={() => save(false)}>
+              {strings.save}
+            </button>
+          {/if}
+          <button type="submit" class="button primary press" disabled={busy !== null} onclick={signIn}>
+            {editing || created !== null ? strings.signInGoogleAgain : strings.signInGoogle}
+          </button>
+        {:else}
+          <button type="button" class="button secondary tint press" disabled={busy !== null} onclick={test}>
+            {busy === "test" ? strings.testing : strings.test}
+          </button>
+          {#if report && !passed(report)}
+            <button type="button" class="button secondary tint press" disabled={busy !== null} onclick={() => save(true)}>
+              {strings.saveAnyway}
+            </button>
+          {/if}
+          <button type="submit" class="button primary press" disabled={busy !== null || !passed(report)} onclick={() => save(false)}>
+            {strings.save}
           </button>
         {/if}
-        <button type="submit" class="button primary press" disabled={busy !== null || !passed(report)} onclick={() => save(false)}>
-          {strings.save}
-        </button>
       </div>
     {/if}
   </form>

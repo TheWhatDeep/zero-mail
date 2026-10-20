@@ -281,6 +281,28 @@ describe("account form", () => {
     expect(defaultPort("smtp", "tls")).toBe("465");
   });
 
+  it("Google sign-in takes the client ID and secret instead of a password (G70)", () => {
+    const google: Candidate = { ...candidate, auth_methods: ["oauth_google", "password"], probe_error: null };
+    const f = fromCandidate(emptyFields("me@workspace.test"), google);
+    expect(f.method).toBe("oauth_google");
+    expect(validate(f, false)).toEqual(["clientId", "clientSecret"]);
+    const filled = { ...f, clientId: " id.apps.googleusercontent.com ", clientSecret: " s3cret ", password: "ignored" };
+    expect(validate(filled, false)).toEqual([]);
+    expect(toConfig(filled, false)).toMatchObject({
+      auth_kind: "oauth_google",
+      password: null,
+      oauth_client_id: "id.apps.googleusercontent.com",
+      oauth_client_secret: "s3cret",
+    });
+    // An edit keeps the saved secret; the ID stays required.
+    expect(validate({ ...filled, clientSecret: "" }, true)).toEqual([]);
+    expect(toConfig({ ...filled, clientSecret: "" }, false).oauth_client_secret).toBeNull();
+    expect(validate({ ...filled, clientId: "" }, true)).toEqual(["clientId"]);
+    // A password account sends no client fields.
+    const pw = { ...filled, method: "password" as const, password: "pw" };
+    expect(toConfig(pw, false)).toMatchObject({ oauth_client_id: null, oauth_client_secret: null, password: "pw" });
+  });
+
   it("offers a certificate fingerprint to pin and needs both halves to pass", () => {
     expect(certificateToPin(null, candidate.probe_error)).toBe("ab".repeat(32));
     expect(certificateToPin({ code: "network", message: "x" })).toBeNull();

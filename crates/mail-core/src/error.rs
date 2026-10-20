@@ -130,6 +130,9 @@ impl From<AuthError> for AppError {
             AuthError::MissingSecret => ErrorCode::AuthFailed,
             AuthError::Keychain(_) => ErrorCode::Keychain,
             AuthError::Unsupported(_) => ErrorCode::Unsupported,
+            AuthError::Network(_) => ErrorCode::Network,
+            AuthError::Rejected(_) => ErrorCode::AuthFailed,
+            AuthError::OAuth(_) => ErrorCode::Oauth,
         };
         Self::new(code, err.to_string())
     }
@@ -203,6 +206,18 @@ mod tests {
         assert_eq!(
             AppError::from(StoreError::DiskFull).code,
             ErrorCode::DiskFull
+        );
+        assert_eq!(
+            AppError::from(AuthError::Rejected("invalid_grant".into())).code,
+            ErrorCode::AuthFailed
+        );
+        assert_eq!(
+            AppError::from(AuthError::Network("down".into())).code,
+            ErrorCode::Network
+        );
+        assert_eq!(
+            AppError::from(AuthError::OAuth("denied".into())).code,
+            ErrorCode::Oauth
         );
         assert_eq!(
             AppError::from(AuthError::MissingSecret).code,

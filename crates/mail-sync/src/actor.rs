@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mail_auth::{Login, LoginSource};
+use mail_auth::{Login, LoginRequest, LoginSource};
 use mail_imap::{
     BodyPart, ConnectConfig, Credentials, ErrorClass, HeaderFetch, IdleEvent, ImapConnector,
     ImapError, ImapTransport, Security, UidSet, CONNECT_TIMEOUT, FETCH_BATCH, IDLE_REISSUE,
@@ -354,6 +354,20 @@ fn connect_config(account: &Account) -> ConnectConfig {
     }
 }
 
+/// What the login source needs to know about an account.
+pub fn login_request(account: &Account) -> LoginRequest {
+    let a = &account.config;
+    LoginRequest {
+        account_id: account.id,
+        username: a.username.clone(),
+        method: match a.auth_kind {
+            mail_store::AuthKind::Password => mail_auth::AuthMethod::Password,
+            mail_store::AuthKind::OauthGoogle => mail_auth::AuthMethod::OauthGoogle,
+        },
+        client_id: a.oauth_client_id.clone(),
+    }
+}
+
 fn credentials(login: &Login) -> Credentials {
     let secret = mail_imap::Secret::new(login.secret.expose());
     match login.method {
@@ -503,12 +517,7 @@ where
     /// news and requests until something fails or the user stops it.
     async fn session(&mut self, account: &Account) -> Exit {
         let account_id = self.account_id;
-        let login = match self
-            .deps
-            .logins
-            .login(account_id, &account.config.username)
-            .await
-        {
+        let login = match self.deps.logins.login(&login_request(account)).await {
             Ok(login) => login,
             Err(e) => {
                 return Exit::Failed {

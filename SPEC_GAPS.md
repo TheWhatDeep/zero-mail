@@ -177,8 +177,18 @@ Section 4 says types are the builder's job but marks some columns `NULL`. M1 rea
 - `snoozes.origin_folder_id` has no foreign key either, so that deleting the origin folder neither deletes the snooze nor is blocked by it. Where the message goes back to in that case is M9's question.
 - Every other reference has a foreign key: `ON DELETE CASCADE` to its owner, or `NO ACTION` for `messages.thread_id` and `outbox.identity_id`.
 
-## G23. `bcc:` search has no stored column — Open (blocks the `bcc:` operator in M9 only; the owner agreed 2026-10-20 to decide it before M9)
+## G23. `bcc:` search has no stored column — Resolved 2026-10-20: option (a), local Bcc lists
 Section 10 lists `bcc:` (Sent and Drafts only), but `messages` has no Bcc column. Bcc is never written to the header (section 7), so the Sent copy on the server has none. Bcc exists only in `drafts.content_json` and `outbox.envelope_json`. To be decided before M9.
+
+Options:
+- (a) **Recommended:** `bcc:` matches locally, through the Bcc addresses this app knows.
+  - Drafts are matched through `drafts.content_json`.
+  - Sent messages are matched through the outbox history rows (`outbox.envelope_json`). Each row stores its Bcc list and Message-ID, and the Message-ID is matched to the Sent row.
+  - Search server too sends IMAP `BCC` to Sent and Drafts, which finds copies other clients stored with a Bcc header.
+  - No schema change. Mail sent from another client or another device, and Sent history older than the outbox rows, is not found.
+- (b) `bcc:` runs only as a server search (IMAP `BCC` on Sent and Drafts). It is always empty locally. Our own Sent copies never match, because they carry no Bcc header.
+- (c) Drop `bcc:` from section 10. It becomes a plain word, like unknown operators.
+- (d) Add a `bcc_json` column to `messages`, filled for mail this app sent (schema change).
 
 ## G24. Windows-only builds until M11 — Resolved 2026-10-19
 The owner has only Windows desktops.
@@ -493,3 +503,34 @@ Section 11: a per-account Outbox folder lists failed and `unknown` sends with Re
 Options:
 - (a) **Recommended:** add `outbox.list {account_id}`, returning each item's id, subject, recipients, state, error, send time and creation time. `outbox-state` events keep it current, and the sidebar badge counts failed and `unknown` items.
 - (b) Add a scope `outbox` to `list.page`, with rows that carry the outbox fields.
+
+## G70. Google's Desktop-app client needs its client secret — Resolved 2026-10-20: option (a), keychain
+Section 5 says the user pastes the client ID, and the app ships no client IDs or secrets. But Google's token endpoint refuses a Desktop-app client that sends only the ID, even with PKCE: the reply is `invalid_request`, "client_secret is missing". Google's Credentials page shows a client secret for every Desktop client. Google's documentation says that for installed apps this secret "is obviously not treated as a secret". The schema has `oauth_client_id` and no column for the secret.
+
+Options:
+- (a) **Recommended:** the form also takes the client secret. It goes to the keychain as `account:<id>:oauth_client_secret`, a third `SecretKind`, and never into the database. It is sent only to Google's token endpoint. The ID stays in `accounts.oauth_client_id`. No schema change.
+- (b) Store the secret in a new `accounts` column (schema change; a secret in the database breaks invariant 5).
+- (c) Client ID only. Sign-in would fail at Google for Desktop clients, so T31 cannot pass.
+
+## G71. Signing in with Google when the account does not exist yet — Resolved 2026-10-20: option (a), save then sign in
+`account.oauth_start` takes an `account_id`, so the account exists before the browser opens. Section 5, step 4 saves an account only after Test connection passes, but Test needs a token, which needs the sign-in.
+
+Options:
+- (a) **Recommended:** save first, then sign in.
+  - `account.add` with `auth_kind: oauth_google` saves the account with its client ID and secret and runs no test. Its actor waits in `NeedsAttention` (`auth_failed`, no refresh token) and makes no connection.
+  - The form then calls `account.oauth_start`, and the app opens the system browser. On the loopback redirect Core exchanges the code and stores the refresh token in the keychain. It then runs Test connection (IMAP XOAUTH2 plus `LIST`, SMTP XOAUTH2) and fires `oauth-done {ok, error?}`. On success the actor connects.
+  - Cancelling the new-account form before a successful sign-in removes that account.
+  - Sign in again (the `NeedsAttention` banner) is `account.oauth_start` on the existing account. Nothing is deleted, so no data is lost (T32).
+- (b) Sign in before saving. `account.oauth_start` would need a config instead of an account_id (a command contract change).
+
+## G72. Small M8 details — Resolved by interpretation (owner to ratify)
+- **When tokens refresh:** a login uses the access token in memory while more than 5 minutes of it remain. Otherwise the login refreshes it first (section 5). A connection already signed in stays open; Google decides how long. A restart always refreshes, because access tokens are never stored.
+- **Refresh failures:**
+  - A refused grant or client (`invalid_grant`, `invalid_client` and the other OAuth error codes) is `auth_failed`. The account goes to `NeedsAttention`, with no retry (T32).
+  - Google out of reach, a 5xx or `temporarily_unavailable` is `network`. The account goes to Backoff, and a send waits in `retry_wait` instead of failing (the M7 hand-over question).
+- **The consent request:** scope `https://mail.google.com/`, PKCE S256, `access_type=offline` and `prompt=consent` (Google returns a refresh token only then), and `login_hint` with the account's address. The client secret travels in the token request body, never in the browser URL.
+- **The loopback listener:** `127.0.0.1` on a random port, waiting at most 5 minutes. It accepts only a `GET` that carries the request's `state`; anything else gets a 404 and is ignored. The browser page it returns is a single sentence with `Content-Security-Policy: default-src 'none'`. A second `account.oauth_start` for the same account closes the first listener.
+- **After the exchange:** the refresh token is saved and the actor reconnects, even if the Test connection that follows fails. `oauth-done` then carries the test's error.
+- **Editing a Google account:** the edit saves without a test, because the next sign-in tests it. Empty client fields keep the saved ID and secret. The sign-in method cannot change on an existing account.
+- **The setup form:** when the host offers both, a Sign-in method choice, Google first (section 5, step 3). Google sign-in shows the client ID and secret fields in place of the password, and Save and sign in with Google in place of Test and Save.
+- **Fakes:** the fake IMAP and SMTP servers record each login's mechanism (`password` or `xoauth2`, never the secret), so tests can tell XOAUTH2 was used.

@@ -16,7 +16,7 @@ mod convert;
 mod folder;
 pub mod ops;
 
-pub use actor::{spawn_account, AccountHandle, SyncDeps};
+pub use actor::{login_request, spawn_account, AccountHandle, SyncDeps};
 pub use body::preview;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -65,6 +65,8 @@ impl SyncError {
     pub fn class(&self) -> ErrorClass {
         match self {
             Self::Imap(e) => e.class(),
+            // Google's token endpoint out of reach: try again later.
+            Self::Auth(e) if e.is_transient() => ErrorClass::Transient,
             // No usable credentials: only the user can fix it.
             Self::Auth(_) => ErrorClass::NeedsAttention,
             Self::Store(_) => ErrorClass::Transient,

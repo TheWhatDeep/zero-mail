@@ -137,6 +137,7 @@ export const strings = {
   securityStartTls: "STARTTLS",
   manualHint: "No settings were found for this address. Enter your provider's server details.",
   foundHint: "Server settings found. Check them, then enter your app password.",
+  foundHintGoogle: "Server settings found. Check them, then enter your Google client ID and secret.",
   test: "Test connection",
   testing: "Testing",
   save: "Save",
@@ -154,7 +155,17 @@ export const strings = {
   certificateFingerprint: "SHA-256 fingerprint",
   trustCertificate: "Trust this certificate",
   pinned: "Certificate trusted for this account",
-  oauthLater: "Google sign-in arrives in a later version; use an app password for now.",
+  methodLabel: "Sign-in method",
+  methodGoogle: "Sign in with Google",
+  methodPassword: "App password",
+  clientIdLabel: "Google client ID",
+  clientSecretLabel: "Google client secret",
+  clientSecretKeep: "Leave empty to keep the saved secret",
+  oauthHint:
+    "Use the OAuth client of type Desktop app from your own Google Cloud project, set to Internal. Zero Mail ships no client of its own; the secret stays in your system keychain.",
+  signInGoogle: "Save and sign in with Google",
+  signInGoogleAgain: "Sign in with Google",
+  oauthWaiting: "Finish signing in in your browser. This form updates when Google sends you back.",
   fieldInvalid: "Check this field",
 
   // Compose (section 11, Compose; section 7)

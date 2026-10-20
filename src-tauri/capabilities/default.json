@@ -10,6 +10,7 @@
     "allow-account-add",
     "allow-account-update",
     "allow-account-remove",
+    "allow-account-oauth-start",
     "allow-account-set-enabled",
     "allow-folder-list",
     "allow-folder-refresh",

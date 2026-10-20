@@ -53,6 +53,8 @@ export interface AccountSummary {
   smtp: Endpoint;
   username: string;
   auth_kind: AuthKind;
+  /** The Google client ID (not a secret); empty for password accounts. */
+  oauth_client_id: string;
   pinned_cert_sha256: string | null;
   enabled: boolean;
   sync_days: number;
@@ -80,7 +82,7 @@ export interface TestReport {
   folders: number;
 }
 
-/** The password goes to Core once and is never sent back. */
+/** The password and the Google client secret go to Core once and are never sent back. */
 export interface AccountConfig {
   name: string;
   email: string;
@@ -91,6 +93,9 @@ export interface AccountConfig {
   password: string | null;
   pinned_cert_sha256: string | null;
   save_anyway: boolean;
+  /** Google sign-in only (SPEC_GAPS G70); null keeps the saved value on update. */
+  oauth_client_id?: string | null;
+  oauth_client_secret?: string | null;
 }
 
 export type Role = "inbox" | "drafts" | "sent" | "archive" | "junk" | "trash" | "all";
@@ -336,6 +341,8 @@ export const commands = {
   "account.update": (account_id: number, config: AccountConfig) =>
     call<AccountSummary>("account_update", { account_id, config }),
   "account.remove": (account_id: number) => call<null>("account_remove", { account_id }),
+  /** Opens Google's consent page in the browser; the result arrives as oauth-done. */
+  "account.oauth_start": (account_id: number) => call<null>("account_oauth_start", { account_id }),
   "account.set_enabled": (account_id: number, enabled: boolean) =>
     call<null>("account_set_enabled", { account_id, enabled }),
   "folder.list": (account_id: number) => call<FolderView[]>("folder_list", { account_id }),
@@ -407,6 +414,7 @@ export interface EventMap {
   "storage-warning": { kind: "disk_full" | "db_corrupt" };
   "pending-count": { total: number };
   "op-failed": { account_id: number; op_id: number; kind: OpKind; error: AppError };
+  "oauth-done": { account_id: number; ok: boolean; error: AppError | null };
   "outbox-state": {
     outbox_id: number;
     account_id: number;

@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use std::sync::Weak;
 use std::time::Duration;
 
-use mail_auth::HttpGet;
 use mail_imap::{Flag, ImapConnector};
 use mail_outbox::Transition;
 use mail_smtp::{
@@ -271,7 +270,7 @@ impl<I, S, H> Core<I, S, H>
 where
     I: ImapConnector + Clone + 'static,
     S: SmtpCheck + SmtpSubmit + Clone + 'static,
-    H: HttpGet + 'static,
+    H: crate::core::Http,
 {
     fn drafts_dir(&self, draft_id: DraftId) -> PathBuf {
         self.data_dir.join("drafts").join(draft_id.to_string())
@@ -979,12 +978,12 @@ where
     async fn send_due(&self, id: OutboxId, now: i64) -> Result<(), AppError> {
         let item = self.store.get_outbox(id).await?;
         let account = self.store.get_account(item.account_id).await?;
+        use mail_auth::LoginSource as _;
         let login = self
             .deps
             .logins
-            .login(item.account_id, &account.config.username)
+            .login(&mail_sync::login_request(&account))
             .await;
-        use mail_auth::LoginSource as _;
         let login = login
             .map(|l| match l.method {
                 mail_auth::AuthMethod::Password => SmtpLogin::Password {
@@ -996,7 +995,15 @@ where
                     token: l.secret.expose().to_string(),
                 },
             })
-            .map_err(|_| SubmitError::AuthFailed);
+            // XOAUTH2 tokens are refreshed first (section 7); Google out of reach is a
+            // transient failure, a refused grant a permanent one.
+            .map_err(|e| {
+                if e.is_transient() {
+                    SubmitError::Transient(mail_smtp::SmtpError::Network(e.to_string()))
+                } else {
+                    SubmitError::AuthFailed
+                }
+            });
         let config = smtp_config(&account);
         let transition =
             mail_outbox::send_one(&self.store, &self.smtp, &config, login, id, now).await?;

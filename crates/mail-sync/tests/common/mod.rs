@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mail_auth::{AuthError, AuthMethod, Login, LoginSource, Secret};
+use mail_auth::{AuthError, AuthMethod, Login, LoginRequest, LoginSource, Secret};
 use mail_imap::fake::{FakeMessage, FakeServer, FakeTransport};
 use mail_imap::{ConnectConfig, Credentials, ImapConnector, ImapError};
 use mail_store::*;
@@ -80,7 +80,8 @@ impl Logins {
 }
 
 impl LoginSource for Logins {
-    async fn login(&self, _account_id: i64, username: &str) -> Result<Login, AuthError> {
+    async fn login(&self, request: &LoginRequest) -> Result<Login, AuthError> {
+        let username = request.username.as_str();
         let password = self
             .0
             .lock()

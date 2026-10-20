@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use mail_auth::{HttpGet, KeychainLogins};
+use mail_auth::{HttpGet, HttpPost, KeychainLogins, LoginSource};
 use mail_imap::ImapConnector;
 use mail_render::{
     AttachmentCache, BodyRequest, BodyResponse, CacheKey, RemoteProxy, TempFiles, UrlForm,
@@ -45,6 +45,11 @@ const TEMP_DIR: &str = "tmp";
 const LINK_SCHEMES: &[&str] = &["http", "https", "tel"];
 /// Written when a background check fails; the next start moves the database aside.
 const REBUILD_MARKER: &str = "rebuild-database";
+
+/// The HTTP the core needs: autoconfig lookups and Google's token endpoint.
+pub trait Http: HttpGet + HttpPost + Clone + 'static {}
+
+impl<T: HttpGet + HttpPost + Clone + 'static> Http for T {}
 
 /// An account state as the UI names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,6 +137,13 @@ pub enum CoreEvent {
         kind: String,
         error: AppError,
     },
+    /// A browser sign-in ended: tokens saved and Test connection passed, or why not
+    /// (section 3; SPEC_GAPS G71).
+    OauthDone {
+        account_id: AccountId,
+        ok: bool,
+        error: Option<AppError>,
+    },
 }
 
 impl CoreEvent {
@@ -146,6 +158,7 @@ impl CoreEvent {
             Self::PendingCount { .. } => "pending-count",
             Self::OutboxState { .. } => "outbox-state",
             Self::OpFailed { .. } => "op-failed",
+            Self::OauthDone { .. } => "oauth-done",
         }
     }
 }
@@ -175,7 +188,9 @@ type States = Arc<Mutex<HashMap<AccountId, (StateName, Option<AppError>)>>>;
 pub struct Core<I, S, H> {
     pub(crate) store: Store,
     accounts: Accounts<I, S, H>,
-    pub(crate) deps: SyncDeps<I, KeychainLogins>,
+    pub(crate) deps: SyncDeps<I, KeychainLogins<H>>,
+    /// The browser sign-in waiting for its redirect, per account (section 5).
+    sign_ins: Mutex<HashMap<AccountId, tokio::task::JoinHandle<()>>>,
     /// Submission for the outbox (section 7).
     pub(crate) smtp: S,
     /// The undo window and upload delay (section 7).
@@ -252,7 +267,7 @@ impl<I, S, H> Core<I, S, H>
 where
     I: ImapConnector + Clone + 'static,
     S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
-    H: HttpGet + 'static,
+    H: crate::core::Http,
 {
     /// Opens the database (section 12 open path), starts one actor per account and the
     /// event pump, and schedules the background integrity check.
@@ -281,7 +296,10 @@ where
         let deps = SyncDeps {
             store: store.clone(),
             connector: Arc::new(config.imap.clone()),
-            logins: Arc::new(KeychainLogins::new(Arc::clone(&config.secrets))),
+            logins: Arc::new(KeychainLogins::new(
+                Arc::clone(&config.secrets),
+                config.http.clone(),
+            )),
             events: Events::new(tx),
         };
         // A crash mid-send leaves `sending`: never retried, the user decides (section 7).
@@ -299,6 +317,7 @@ where
             smtp: config.smtp,
             timing: Mutex::default(),
             upload_timers: Mutex::default(),
+            sign_ins: Mutex::default(),
             outbox_wake: Arc::default(),
             me: std::sync::OnceLock::new(),
             store,
@@ -431,6 +450,10 @@ where
         if let Some(actor) = actor {
             actor.shutdown().await;
         }
+        if let Some(task) = lock(&self.sign_ins).remove(&account_id) {
+            task.abort();
+        }
+        self.deps.logins.forget(account_id);
         lock(&self.states).remove(&account_id);
         self.accounts.remove(account_id).await?;
         let cache = self.cache.clone();
@@ -446,6 +469,91 @@ where
         self.with_actor(account_id, AccountHandle::account_changed)
             .await;
         Ok(())
+    }
+
+    /// `account.oauth_start`: listens on the loopback redirect and returns the consent URL
+    /// for the app to open in the system browser. The result arrives as `oauth-done`: the
+    /// code is exchanged, the refresh token goes to the keychain, Test connection runs with
+    /// the new access token, and the actor reconnects (section 5; SPEC_GAPS G71). A second
+    /// start for the same account replaces the first.
+    pub async fn account_oauth_start(&self, account_id: AccountId) -> Result<String, AppError> {
+        let account = self.store.get_account(account_id).await?;
+        if account.config.auth_kind != mail_store::AuthKind::OauthGoogle {
+            return Err(
+                AppError::invalid("this account does not use Google sign-in")
+                    .for_account(account_id),
+            );
+        }
+        let client = self
+            .deps
+            .logins
+            .google_client(account_id, &account.config.oauth_client_id)
+            .await
+            .map_err(|e| AppError::from(e).for_account(account_id))?;
+        let sign_in = mail_auth::oauth::begin(&client, &account.config.email)
+            .await
+            .map_err(|e| AppError::from(e).for_account(account_id))?;
+        let url = sign_in.url().to_string();
+        let me = self.me.get().cloned();
+        let logins = Arc::clone(&self.deps.logins);
+        let task = tokio::spawn(async move {
+            let timeout = mail_auth::oauth::SIGN_IN_TIMEOUT;
+            let result = mail_auth::oauth::finish(sign_in, &client, logins.http(), timeout).await;
+            if let Some(core) = me.and_then(|w| w.upgrade()) {
+                core.oauth_finished(account_id, result).await;
+            }
+        });
+        if let Some(old) = lock(&self.sign_ins).insert(account_id, task) {
+            old.abort();
+        }
+        Ok(url)
+    }
+
+    async fn oauth_finished(
+        &self,
+        account_id: AccountId,
+        result: Result<mail_auth::Tokens, mail_auth::AuthError>,
+    ) {
+        let outcome = self.oauth_outcome(account_id, result).await;
+        if let Err(e) = &outcome {
+            tracing::warn!(account_id, code = ?e.code, "Google sign-in did not complete");
+        }
+        self.emit(CoreEvent::OauthDone {
+            account_id,
+            ok: outcome.is_ok(),
+            error: outcome.err(),
+        });
+        lock(&self.sign_ins).remove(&account_id);
+    }
+
+    async fn oauth_outcome(
+        &self,
+        account_id: AccountId,
+        result: Result<mail_auth::Tokens, mail_auth::AuthError>,
+    ) -> Result<(), AppError> {
+        let err = |e: AppError| e.for_account(account_id);
+        let tokens = result.map_err(|e| err(e.into()))?;
+        self.deps
+            .logins
+            .signed_in(account_id, tokens)
+            .await
+            .map_err(|e| err(e.into()))?;
+        // Signed in: the actor leaves NeedsAttention and connects with the new token,
+        // whatever the test below finds.
+        self.with_actor(account_id, AccountHandle::account_changed)
+            .await;
+        let account = self.store.get_account(account_id).await?;
+        let login = self
+            .deps
+            .logins
+            .login(&mail_sync::login_request(&account))
+            .await
+            .map_err(|e| err(e.into()))?;
+        let report = self.accounts.test_saved(account_id, &login).await?;
+        match report.imap_error.or(report.smtp_error) {
+            Some(e) => Err(err(e)),
+            None => Ok(()),
+        }
     }
 
     /// `folder.list`: the folder tree with counts and roles.
@@ -833,7 +941,7 @@ async fn outbox_runner<I, S, H>(
 ) where
     I: ImapConnector + Clone + 'static,
     S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
-    H: HttpGet + 'static,
+    H: crate::core::Http,
 {
     loop {
         let tick = match core.upgrade() {

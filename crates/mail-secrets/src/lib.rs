@@ -53,15 +53,22 @@ pub enum SecretKind {
     Password,
     /// OAuth refresh token (section 5, Tokens; M8).
     RefreshToken,
+    /// The client secret of the user's own Google Desktop-app client (SPEC_GAPS G70).
+    OauthClientSecret,
 }
 
 impl SecretKind {
-    pub const ALL: [SecretKind; 2] = [SecretKind::Password, SecretKind::RefreshToken];
+    pub const ALL: [SecretKind; 3] = [
+        SecretKind::Password,
+        SecretKind::RefreshToken,
+        SecretKind::OauthClientSecret,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
             Self::Password => "password",
             Self::RefreshToken => "refresh_token",
+            Self::OauthClientSecret => "oauth_client_secret",
         }
     }
 }
@@ -177,6 +184,10 @@ mod tests {
     fn keys_follow_section_5() {
         assert_eq!(key(7, SecretKind::Password), "account:7:password");
         assert_eq!(key(7, SecretKind::RefreshToken), "account:7:refresh_token");
+        assert_eq!(
+            key(7, SecretKind::OauthClientSecret),
+            "account:7:oauth_client_secret"
+        );
     }
 
     #[test]

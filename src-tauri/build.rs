@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "account_add",
     "account_update",
     "account_remove",
+    "account_oauth_start",
     "account_set_enabled",
     "folder_list",
     "folder_refresh",

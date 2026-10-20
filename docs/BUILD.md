@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.16 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.17 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -274,7 +274,7 @@ An account is a server config plus a login method. Nothing else differs between 
 | App password | Any server | `AUTHENTICATE PLAIN` over TLS (fallback `LOGIN`). Password in keychain. |
 | XOAUTH2, Google | Workspace | Desktop-app client type, PKCE, loopback redirect to `127.0.0.1` on a random port, scope `https://mail.google.com/`. |
 
-**Bring-your-own OAuth client.** The app ships no client IDs or secrets. The user creates an OAuth client in their own Google Cloud project (set to Internal, so no Google verification) and pastes the client ID during setup. Consequence: personal gmail.com accounts use app passwords.
+**Bring-your-own OAuth client.** The app ships no client IDs or secrets. The user creates an OAuth client in their own Google Cloud project (set to Internal, so no Google verification) and pastes the client ID during setup, with the client secret Google shows for it. Google's token endpoint requires that secret for Desktop-app clients. It is kept only in the keychain, as `account:<id>:oauth_client_secret`, and is sent only to Google's token endpoint (SPEC_GAPS G70). An OAuth account is saved first and signed in second. `account.oauth_start` opens the browser. Test connection runs after the token exchange, and `oauth-done` carries its result (SPEC_GAPS G71). Consequence: personal gmail.com accounts use app passwords.
 
 **Tokens.** Access tokens live in memory only and refresh 5 minutes before expiry. The refresh token lives in the keychain. On `invalid_grant` the account goes to `NeedsAttention` (section 6): connections stop, a banner says Sign in again, and nothing retries. Passwords sit under keychain key `account:<id>:password`.
 
@@ -426,7 +426,7 @@ Threads are built locally per account, across folders. Search is local-first ful
 **Search**
 
 - Index: FTS5 over subject, from, to and cc, and body text, with tokenizer `unicode61 remove_diacritics 2` and prefix matching on the last token. Only messages with downloaded bodies have body text indexed; the UI shows how many are not, with a Search server too button.
-- Syntax: words (AND), `"phrase"`, `from:`, `to:`, `cc:`, `bcc:` (Sent and Drafts only), `subject:`, `in:<folder>`, `label:` (alias of `in:`), `is:unread|read|starred|snoozed|muted`, `has:attachment`, `filename:`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`, `older_than:` and `newer_than:` with `d`, `m` or `y`, `larger:` and `smaller:` with `k` or `m`, `account:<email>`, `-term` negation, `OR` between terms. Unknown operators are treated as plain words.
+- Syntax: words (AND), `"phrase"`, `from:`, `to:`, `cc:`, `bcc:` (Sent and Drafts only; matched through the Bcc lists of local drafts and of the outbox history, SPEC_GAPS G23), `subject:`, `in:<folder>`, `label:` (alias of `in:`), `is:unread|read|starred|snoozed|muted`, `has:attachment`, `filename:`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`, `older_than:` and `newer_than:` with `d`, `m` or `y`, `larger:` and `smaller:` with `k` or `m`, `account:<email>`, `-term` negation, `OR` between terms. Unknown operators are treated as plain words.
 - Scope: the current account, all folders except Trash and Junk. A toggle widens it to all accounts.
 - Server search: IMAP `UID SEARCH` (`TEXT`, `FROM`, `SUBJECT`, `CC`, `BCC`, `SINCE`, `BEFORE`, `UNSEEN`, `FLAGGED`, `LARGER`, `SMALLER`, `NOT`, `OR`) on the selected folders, or `X-GM-RAW` on Gmail; the rest runs locally. Hits not in the cache are header-fetched into the store, marked as outside the sync window, then listed. Results cap at 500.
 - Typing debounces 150 ms and cancels any query still running.
@@ -766,6 +766,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.17 | 2026-10-20 | Owner decisions (SPEC_GAPS G23, G70, G71): `bcc:` through local Bcc lists; the Google client secret in the keychain; OAuth accounts are saved, then signed in. |
 | v0.16 | 2026-10-20 | Owner decision (SPEC_GAPS G69): command `outbox.list`. |
 | v0.15 | 2026-10-20 | Owner decisions (SPEC_GAPS G63 to G66, G68): compose windows opened by the app; `identity.list`, `identity.save`, `identity.delete`; the size check when reachable; Sent copy and draft uploads through `ops`; T19's webview half runs as a walk against a local beacon server. |
 | v0.14 | 2026-10-20 | Owner decisions (SPEC_GAPS G58 to G61): event `op-failed`; pending moves and deletes hide rows through bit 5; T25 split between M6 and M9; Gmail Important and Starred start with sync off and hidden. |

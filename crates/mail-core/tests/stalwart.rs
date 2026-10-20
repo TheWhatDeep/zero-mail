@@ -15,7 +15,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{secrets, TempDir};
-use mail_auth::HttpGet;
+use mail_auth::{HttpFailure, HttpGet, HttpPost, HttpReply};
 use mail_core::{AccountConfig, Accounts, AuthKind, Endpoint, ErrorCode, Security, ONLINE_LOOKUPS};
 use mail_imap::{ConnectConfig, Credentials, ImapClient, ImapConnector, ImapTransport, Secret};
 use mail_secrets::SecretStore;
@@ -34,6 +34,12 @@ struct NoHttp;
 impl HttpGet for NoHttp {
     async fn get(&self, _url: &str) -> Option<Vec<u8>> {
         None
+    }
+}
+
+impl HttpPost for NoHttp {
+    async fn post_form(&self, _url: &str, _body: Vec<u8>) -> Result<HttpReply, HttpFailure> {
+        Err(HttpFailure("no network in tests".into()))
     }
 }
 
@@ -80,6 +86,8 @@ fn config(user: &str, password: &str, starttls: bool) -> AccountConfig {
         save_anyway: false,
         signature_html: None,
         signature_text: None,
+        oauth_client_id: None,
+        oauth_client_secret: None,
     }
 }
 

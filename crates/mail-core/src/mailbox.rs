@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use mail_auth::HttpGet;
 use mail_imap::{Flag, ImapConnector};
 use mail_smtp::SmtpCheck;
 use mail_store::{
@@ -60,7 +59,7 @@ impl<I, S, H> Core<I, S, H>
 where
     I: ImapConnector + Clone + 'static,
     S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
-    H: HttpGet + 'static,
+    H: crate::core::Http,
 {
     /// Queues ops (for the outbox and drafts); see [`Self::queue`].
     pub(crate) async fn queue_ops(&self, new: Vec<NewOp>) -> Result<OpId, AppError> {

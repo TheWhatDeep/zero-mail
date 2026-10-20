@@ -35,6 +35,8 @@ struct State {
     data_started: usize,
     size_limit: Option<u64>,
     submits: usize,
+    /// The mechanism of every login, check or submission: `password` or `xoauth2`.
+    mechanisms: Vec<&'static str>,
 }
 
 impl FakeSmtp {
@@ -47,6 +49,11 @@ impl FakeSmtp {
     /// The next check fails with `error`.
     pub fn fail_next(&self, error: SmtpError) {
         self.lock().fail_next = Some(error);
+    }
+
+    /// The mechanism of every login so far, in order.
+    pub fn mechanisms(&self) -> Vec<&'static str> {
+        self.lock().mechanisms.clone()
     }
 
     /// How many logins were attempted.
@@ -94,18 +101,25 @@ impl FakeSmtp {
     }
 }
 
+fn mechanism(login: &SmtpLogin) -> &'static str {
+    match login {
+        SmtpLogin::Password { .. } => "password",
+        SmtpLogin::XOAuth2 { .. } => "xoauth2",
+    }
+}
+
 impl SmtpCheck for FakeSmtp {
-    async fn check_login(
-        &self,
-        _config: &SmtpConfig,
-        username: &str,
-        password: &str,
-    ) -> Result<(), SmtpError> {
+    async fn check_login(&self, _config: &SmtpConfig, login: &SmtpLogin) -> Result<(), SmtpError> {
         let mut s = self.lock();
         s.attempts += 1;
+        s.mechanisms.push(mechanism(login));
         if let Some(err) = s.fail_next.take() {
             return Err(err);
         }
+        let (username, password) = match login {
+            SmtpLogin::Password { username, password } => (username, password),
+            SmtpLogin::XOAuth2 { username, token } => (username, token),
+        };
         match s.users.get(username) {
             Some(p) if p == password => Ok(()),
             _ => Err(SmtpError::AuthFailed),
@@ -124,6 +138,7 @@ impl SmtpSubmit for FakeSmtp {
         let hang = {
             let mut s = self.lock();
             s.submits += 1;
+            s.mechanisms.push(mechanism(login));
             let (user, secret) = match login {
                 SmtpLogin::Password { username, password } => (username, password),
                 SmtpLogin::XOAuth2 { username, token } => (username, token),

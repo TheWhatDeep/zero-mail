@@ -209,11 +209,19 @@ async fn invalid_input_is_rejected_before_any_connection() {
             ErrorCode::InvalidInput
         );
     }
+    // Google sign-in needs the client ID and its secret (SPEC_GAPS G70).
     let mut oauth = config(USER, USER, PASS);
     oauth.auth_kind = AuthKind::OauthGoogle;
+    oauth.oauth_client_secret = Some(Secret::new("cs"));
+    assert_eq!(
+        s.accounts.add(oauth.clone()).await.unwrap_err().code,
+        ErrorCode::InvalidInput
+    );
+    oauth.oauth_client_id = Some("cid".into());
+    oauth.oauth_client_secret = Some(Secret::new("  "));
     assert_eq!(
         s.accounts.add(oauth).await.unwrap_err().code,
-        ErrorCode::Unsupported
+        ErrorCode::InvalidInput
     );
     assert!(s.imap.calls().is_empty());
 }

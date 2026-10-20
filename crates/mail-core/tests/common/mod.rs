@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mail_auth::HttpGet;
+use mail_auth::{HttpFailure, HttpGet, HttpPost, HttpReply};
 use mail_core::{AccountConfig, AuthKind, Endpoint, Security};
 use mail_secrets::{MemoryStore, Secret};
 use mail_store::Store;
@@ -49,12 +49,45 @@ impl Drop for TempDir {
 pub struct FakeHttp {
     pub pages: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     pub asked: Arc<Mutex<Vec<String>>>,
+    pub token_replies: Arc<Mutex<VecDeque<Result<HttpReply, HttpFailure>>>>,
+    pub posts: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl HttpGet for FakeHttp {
     async fn get(&self, url: &str) -> Option<Vec<u8>> {
         self.asked.lock().unwrap().push(url.to_string());
         self.pages.lock().unwrap().get(url).cloned()
+    }
+}
+
+/// A scripted token endpoint: answers in order, and is unreachable when nothing is left.
+/// Every form posted is kept.
+impl HttpPost for FakeHttp {
+    async fn post_form(&self, url: &str, body: Vec<u8>) -> Result<HttpReply, HttpFailure> {
+        self.posts
+            .lock()
+            .unwrap()
+            .push((url.to_string(), String::from_utf8(body).unwrap()));
+        self.token_replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(HttpFailure("unreachable".into())))
+    }
+}
+
+impl FakeHttp {
+    /// Queues one token endpoint answer.
+    pub fn token_reply(&self, status: u16, json: &str) {
+        self.token_replies.lock().unwrap().push_back(Ok(HttpReply {
+            status,
+            body: json.as_bytes().to_vec(),
+        }));
+    }
+
+    /// The forms posted so far, as (url, body).
+    pub fn posts(&self) -> Vec<(String, String)> {
+        self.posts.lock().unwrap().clone()
     }
 }
 
@@ -83,5 +116,7 @@ pub fn config(email: &str, username: &str, password: &str) -> AccountConfig {
         save_anyway: false,
         signature_html: None,
         signature_text: None,
+        oauth_client_id: None,
+        oauth_client_secret: None,
     }
 }

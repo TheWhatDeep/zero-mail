@@ -1,9 +1,10 @@
 // The minimal add-account form (SPEC_GAPS G43), as plain state and pure functions: resolve
 // fills the server fields, Test reports both halves, Save needs both to pass unless the user
 // picks Save anyway (section 5, step 4), and a certificate error offers its fingerprint to
-// pin (SPEC_GAPS G34).
+// pin (SPEC_GAPS G34). Google sign-in takes the user's own client ID and secret instead of a
+// password; the account is saved first and signed in second (SPEC_GAPS G70, G71).
 
-import type { AccountConfig, AccountSummary, AppError, Candidate, Endpoint, Security, TestReport } from "./ipc";
+import type { AccountConfig, AccountSummary, AppError, AuthKind, Candidate, Endpoint, Security, TestReport } from "./ipc";
 
 export interface FormFields {
   name: string;
@@ -15,7 +16,10 @@ export interface FormFields {
   smtpPort: string;
   smtpSecurity: Security;
   username: string;
+  method: AuthKind;
   password: string;
+  clientId: string;
+  clientSecret: string;
   pin: string | null;
 }
 
@@ -31,7 +35,10 @@ export function emptyFields(email = ""): FormFields {
     smtpPort: "465",
     smtpSecurity: "tls",
     username: email,
+    method: "password",
     password: "",
+    clientId: "",
+    clientSecret: "",
     pin: null,
   };
 }
@@ -46,6 +53,8 @@ export function fromCandidate(fields: FormFields, c: Candidate): FormFields {
     smtpPort: String(c.smtp.port),
     smtpSecurity: c.smtp.security,
     username: c.username,
+    // Section 5, step 3: the login method the host offers first (OAuth for Google).
+    method: c.auth_methods[0] ?? "password",
   };
 }
 
@@ -60,7 +69,10 @@ export function fromSummary(a: AccountSummary): FormFields {
     smtpPort: String(a.smtp.port),
     smtpSecurity: a.smtp.security,
     username: a.username,
+    method: a.auth_kind,
     password: "",
+    clientId: a.oauth_client_id,
+    clientSecret: "",
     pin: a.pinned_cert_sha256,
   };
 }
@@ -71,7 +83,16 @@ export function defaultPort(kind: "imap" | "smtp", security: Security): string {
   return security === "tls" ? "465" : "587";
 }
 
-export type FieldError = "email" | "imapHost" | "imapPort" | "smtpHost" | "smtpPort" | "username" | "password";
+export type FieldError =
+  | "email"
+  | "imapHost"
+  | "imapPort"
+  | "smtpHost"
+  | "smtpPort"
+  | "username"
+  | "password"
+  | "clientId"
+  | "clientSecret";
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HOST = /^[^\s/:?#]+$/;
@@ -81,7 +102,8 @@ function portOk(p: string): boolean {
   return Number.isInteger(n) && n >= 1 && n <= 65535;
 }
 
-/** Field problems; a new account needs a password, an edit may keep the saved one. */
+/** Field problems; a new account needs its password (or Google client ID and secret), an
+ * edit may keep the saved ones. */
 export function validate(f: FormFields, editing: boolean): FieldError[] {
   const out: FieldError[] = [];
   if (!EMAIL.test(f.email.trim())) out.push("email");
@@ -90,7 +112,12 @@ export function validate(f: FormFields, editing: boolean): FieldError[] {
   if (!HOST.test(f.smtpHost.trim())) out.push("smtpHost");
   if (!portOk(f.smtpPort)) out.push("smtpPort");
   if (!f.username.trim()) out.push("username");
-  if (!editing && !f.password) out.push("password");
+  if (f.method === "password") {
+    if (!editing && !f.password) out.push("password");
+  } else {
+    if (!f.clientId.trim()) out.push("clientId");
+    if (!editing && !f.clientSecret.trim()) out.push("clientSecret");
+  }
   return out;
 }
 
@@ -105,10 +132,12 @@ export function toConfig(f: FormFields, saveAnyway: boolean): AccountConfig {
     imap: endpoint(f.imapHost, f.imapPort, f.imapSecurity),
     smtp: endpoint(f.smtpHost, f.smtpPort, f.smtpSecurity),
     username: f.username.trim(),
-    auth_kind: "password",
-    password: f.password ? f.password : null,
+    auth_kind: f.method,
+    password: f.method === "password" && f.password ? f.password : null,
     pinned_cert_sha256: f.pin,
     save_anyway: saveAnyway,
+    oauth_client_id: f.method === "oauth_google" ? f.clientId.trim() : null,
+    oauth_client_secret: f.method === "oauth_google" && f.clientSecret.trim() ? f.clientSecret.trim() : null,
   };
 }
 

@@ -65,12 +65,12 @@ pub struct SmtpConfig {
 /// Runs the SMTP half of Test connection. Real servers use [`SmtpClient`]; tests use
 /// [`fake::FakeSmtp`].
 pub trait SmtpCheck: Send + Sync {
-    /// Connects, authenticates with `AUTH PLAIN` (or `LOGIN`) and quits. Sends no message.
+    /// Connects, authenticates (`AUTH PLAIN` or `LOGIN` with a password, `XOAUTH2` with a
+    /// token) and quits. Sends no message.
     fn check_login(
         &self,
         config: &SmtpConfig,
-        username: &str,
-        password: &str,
+        login: &SmtpLogin,
     ) -> impl Future<Output = Result<(), SmtpError>> + Send;
 }
 
@@ -84,18 +84,9 @@ pub(crate) fn client_id() -> ClientId {
 }
 
 impl SmtpCheck for SmtpClient {
-    async fn check_login(
-        &self,
-        config: &SmtpConfig,
-        username: &str,
-        password: &str,
-    ) -> Result<(), SmtpError> {
+    async fn check_login(&self, config: &SmtpConfig, login: &SmtpLogin) -> Result<(), SmtpError> {
         let mut conn = connect(config).await?;
-        let login = SmtpLogin::Password {
-            username: username.to_string(),
-            password: password.to_string(),
-        };
-        if let Err(err) = submit::authenticate(&mut conn, &login).await {
+        if let Err(err) = submit::authenticate(&mut conn, login).await {
             conn.abort().await;
             return Err(err);
         }
@@ -249,6 +240,13 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
+    fn pw() -> SmtpLogin {
+        SmtpLogin::Password {
+            username: "u".into(),
+            password: "p".into(),
+        }
+    }
+
     /// A scripted plaintext server: sends `lines` in order, reading one client line before
     /// each entry after the first.
     async fn server(script: Vec<&'static str>) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
@@ -291,7 +289,7 @@ mod tests {
         ])
         .await;
         let err = SmtpClient
-            .check_login(&config(port), "u", "p")
+            .check_login(&config(port), &pw())
             .await
             .unwrap_err();
         assert_eq!(err, SmtpError::StartTlsUnavailable);
@@ -312,7 +310,7 @@ mod tests {
         ])
         .await;
         let err = SmtpClient
-            .check_login(&config(port), "u", "p")
+            .check_login(&config(port), &pw())
             .await
             .unwrap_err();
         assert_eq!(err, SmtpError::StartTlsUnavailable);
@@ -324,7 +322,7 @@ mod tests {
         let (port, _handle) = server(vec!["220 mail.test ESMTP\r\n"]).await;
         let mut cfg = config(port);
         cfg.security = Security::Tls;
-        let err = SmtpClient.check_login(&cfg, "u", "p").await.unwrap_err();
+        let err = SmtpClient.check_login(&cfg, &pw()).await.unwrap_err();
         assert!(
             matches!(err, SmtpError::Tls(_) | SmtpError::Network(_)),
             "{err:?}"
@@ -333,10 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn refused_port_is_a_network_error() {
-        let err = SmtpClient
-            .check_login(&config(1), "u", "p")
-            .await
-            .unwrap_err();
+        let err = SmtpClient.check_login(&config(1), &pw()).await.unwrap_err();
         assert!(matches!(err, SmtpError::Network(_)), "{err:?}");
         assert_eq!(err.class(), ErrorClass::Transient);
     }

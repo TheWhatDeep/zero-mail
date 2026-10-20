@@ -147,6 +147,18 @@ async fn account_remove(
     core.0.account_remove(account_id).await
 }
 
+/// `account.oauth_start`: Core listens on the loopback redirect; the consent page opens in
+/// the system browser. The result arrives as `oauth-done` (section 3).
+#[tauri::command(rename_all = "snake_case")]
+async fn account_oauth_start(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+) -> Result<(), AppError> {
+    let url = core.0.account_oauth_start(account_id).await?;
+    app.opener().open_url(url, None::<&str>).map_err(os_error)
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn account_set_enabled(
     core: tauri::State<'_, CoreState>,
@@ -772,6 +784,7 @@ fn main() {
             account_add,
             account_update,
             account_remove,
+            account_oauth_start,
             account_set_enabled,
             folder_list,
             folder_refresh,

@@ -482,7 +482,12 @@ impl ImapConnector for FakeServer {
         _config: &ConnectConfig,
         credentials: &Credentials,
     ) -> Result<FakeTransport, ImapError> {
-        self.begin(Op::Connect, None, &UidSet::default(), "")?;
+        // The call records the login mechanism, never the secret.
+        let mechanism = match credentials {
+            Credentials::Password { .. } => "password",
+            Credentials::XOAuth2 { .. } => "xoauth2",
+        };
+        self.begin(Op::Connect, None, &UidSet::default(), mechanism)?;
         let (user, secret) = match credentials {
             Credentials::Password { username, password } => (username, password),
             Credentials::XOAuth2 {

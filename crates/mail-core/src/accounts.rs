@@ -5,6 +5,10 @@
 //! `account:<id>:password`, and is never returned (section 13, item 2). An account saves
 //! only when both halves of Test connection pass (IMAP login plus `LIST`, SMTP `EHLO` plus
 //! `AUTH`), unless the user picks Save anyway (section 5, step 4).
+//!
+//! A Google sign-in account is saved first and signed in second (SPEC_GAPS G71). `add`
+//! keeps its client ID in the row and its client secret in the keychain (G70), and runs no
+//! test. The test runs after the browser sign-in ([`Accounts::test_saved`]).
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mail_auth::{AuthMethod, HttpGet, Secret};
 use mail_imap::{Capabilities, ConnectConfig, Credentials, ImapConnector, ImapTransport};
 use mail_secrets::SecretStore;
-use mail_smtp::{SmtpCheck, SmtpConfig};
+use mail_smtp::{SmtpCheck, SmtpConfig, SmtpLogin};
 use mail_store::{AccountId, NewAccount, NewIdentity, SaveSentCopy, Store};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -76,6 +80,14 @@ pub struct AccountConfig {
     pub signature_html: Option<String>,
     #[serde(default)]
     pub signature_text: Option<String>,
+    /// The user's own Google client ID (section 5); Google sign-in only. On update, `None`
+    /// keeps the saved one.
+    #[serde(default)]
+    pub oauth_client_id: Option<String>,
+    /// Its client secret (SPEC_GAPS G70): keychain only, never echoed back. On update,
+    /// `None` keeps the saved one.
+    #[serde(default, deserialize_with = "secret")]
+    pub oauth_client_secret: Option<Secret>,
 }
 
 fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Secret>, D::Error> {
@@ -92,6 +104,8 @@ pub struct AccountSummary {
     pub smtp: Endpoint,
     pub username: String,
     pub auth_kind: AuthKind,
+    /// The Google client ID (not a secret); empty for password accounts.
+    pub oauth_client_id: String,
     pub pinned_cert_sha256: Option<String>,
     pub enabled: bool,
     pub sync_days: u32,
@@ -200,6 +214,11 @@ where
     /// message is sent and nothing is saved.
     pub async fn test(&self, config: &AccountConfig) -> Result<TestReport, AppError> {
         let valid = validate(config)?;
+        if config.auth_kind == AuthKind::OauthGoogle {
+            return Err(AppError::invalid(
+                "a Google account is tested when it signs in",
+            ));
+        }
         let password = config
             .password
             .clone()
@@ -207,19 +226,36 @@ where
         Ok(self.run_test(config, &valid, &password).await)
     }
 
-    /// `account.add`. Saves the account, its default identity and its password.
+    /// `account.add`. Saves the account, its default identity and its password, or for
+    /// Google sign-in its client secret (G70, G71).
     pub async fn add(&self, config: AccountConfig) -> Result<AccountSummary, AppError> {
         let valid = validate(&config)?;
-        let password = config
-            .password
-            .clone()
-            .ok_or_else(|| AppError::invalid("a password is required"))?;
-        if !config.save_anyway {
-            let report = self.run_test(&config, &valid, &password).await;
-            if let Some(err) = report.first_error() {
-                return Err(err);
+        let (secret, oauth) = match config.auth_kind {
+            AuthKind::Password => {
+                let password = config
+                    .password
+                    .clone()
+                    .ok_or_else(|| AppError::invalid("a password is required"))?;
+                if !config.save_anyway {
+                    let report = self.run_test(&config, &valid, &password).await;
+                    if let Some(err) = report.first_error() {
+                        return Err(err);
+                    }
+                }
+                (password, None)
             }
-        }
+            AuthKind::OauthGoogle => {
+                let client_id = config
+                    .oauth_client_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .ok_or_else(|| AppError::invalid("the Google client ID is required"))?;
+                let secret = client_secret(config.oauth_client_secret.as_ref())
+                    .ok_or_else(|| AppError::invalid("the Google client secret is required"))?;
+                (secret, Some(client_id.to_string()))
+            }
+        };
         let account = NewAccount {
             name: valid.name.clone(),
             email: valid.email.clone(),
@@ -230,8 +266,11 @@ where
             smtp_port: config.smtp.port,
             smtp_security: store_security(config.smtp.security),
             username: config.username.trim().to_string(),
-            auth_kind: mail_store::AuthKind::Password,
-            oauth_client_id: String::new(),
+            auth_kind: match oauth {
+                None => mail_store::AuthKind::Password,
+                Some(_) => mail_store::AuthKind::OauthGoogle,
+            },
+            oauth_client_id: oauth.clone().unwrap_or_default(),
             pinned_cert_sha256: valid.pin_hex.clone(),
             sync_days: DEFAULT_SYNC_DAYS,
             save_sent_copy: SaveSentCopy::Auto,
@@ -247,7 +286,11 @@ where
             is_default: true,
         };
         let (id, _) = self.store.add_account(account, identity).await?;
-        if let Err(err) = self.save_password(id, password).await {
+        let saved = match oauth {
+            None => self.save_password(id, secret).await,
+            Some(_) => self.save_client_secret(id, secret).await,
+        };
+        if let Err(err) = saved {
             // No account without its secret: undo the insert.
             let _ = self.store.delete_account(id).await;
             return Err(err);
@@ -256,7 +299,8 @@ where
     }
 
     /// `account.update`. A `None` password keeps the saved one; the connection test uses
-    /// whichever password will be in effect.
+    /// whichever password will be in effect. A Google account is saved without a test: its
+    /// next sign-in tests it (G71).
     pub async fn update(
         &self,
         id: AccountId,
@@ -264,6 +308,12 @@ where
     ) -> Result<AccountSummary, AppError> {
         let valid = validate(&config).map_err(|e| e.for_account(id))?;
         let existing = self.store.get_account(id).await?.config;
+        if auth_kind_of(existing.auth_kind) != config.auth_kind {
+            return Err(AppError::invalid("the sign-in method cannot change").for_account(id));
+        }
+        if config.auth_kind == AuthKind::OauthGoogle {
+            return self.update_oauth(id, config, valid, existing).await;
+        }
         let password = match &config.password {
             Some(p) => p.clone(),
             None => self.saved_password(id, &existing.username).await?,
@@ -360,6 +410,105 @@ where
         Ok(folders.len())
     }
 
+    async fn update_oauth(
+        &self,
+        id: AccountId,
+        config: AccountConfig,
+        valid: Valid,
+        existing: NewAccount,
+    ) -> Result<AccountSummary, AppError> {
+        let secret = client_secret(config.oauth_client_secret.as_ref());
+        let client_id = match config.oauth_client_id.as_deref().map(str::trim) {
+            None => existing.oauth_client_id.clone(),
+            Some("") => {
+                return Err(AppError::invalid("the Google client ID is required").for_account(id))
+            }
+            Some(c) => c.to_string(),
+        };
+        let account = NewAccount {
+            name: valid.name.clone(),
+            email: valid.email.clone(),
+            imap_host: config.imap.host.trim().to_string(),
+            imap_port: config.imap.port,
+            imap_security: store_security(config.imap.security),
+            smtp_host: config.smtp.host.trim().to_string(),
+            smtp_port: config.smtp.port,
+            smtp_security: store_security(config.smtp.security),
+            username: config.username.trim().to_string(),
+            oauth_client_id: client_id,
+            pinned_cert_sha256: valid.pin_hex.clone(),
+            signature_html: config
+                .signature_html
+                .clone()
+                .unwrap_or(existing.signature_html.clone()),
+            signature_text: config
+                .signature_text
+                .clone()
+                .unwrap_or(existing.signature_text.clone()),
+            ..existing
+        };
+        self.store.update_account(id, account).await?;
+        if let Some(s) = secret {
+            self.save_client_secret(id, s).await?;
+        }
+        self.summary(id).await
+    }
+
+    /// Test connection with a saved account's settings and the given login: after a
+    /// Google sign-in, with the fresh access token (G71).
+    pub async fn test_saved(
+        &self,
+        id: AccountId,
+        login: &mail_auth::Login,
+    ) -> Result<TestReport, AppError> {
+        let a = self.store.get_account(id).await?.config;
+        let imap = Endpoint {
+            host: a.imap_host.clone(),
+            port: a.imap_port,
+            security: core_security(a.imap_security),
+        };
+        let smtp = Endpoint {
+            host: a.smtp_host.clone(),
+            port: a.smtp_port,
+            security: core_security(a.smtp_security),
+        };
+        let pin = a
+            .pinned_cert_sha256
+            .as_deref()
+            .and_then(mail_imap::parse_fingerprint);
+        let secret = login.secret.expose().to_string();
+        let (creds, smtp_login) = match login.method {
+            AuthMethod::Password => (
+                Credentials::Password {
+                    username: login.username.clone(),
+                    password: mail_imap::Secret::new(&secret),
+                },
+                SmtpLogin::Password {
+                    username: login.username.clone(),
+                    password: secret,
+                },
+            ),
+            AuthMethod::OauthGoogle => (
+                Credentials::XOAuth2 {
+                    username: login.username.clone(),
+                    access_token: mail_imap::Secret::new(&secret),
+                },
+                SmtpLogin::XOAuth2 {
+                    username: login.username.clone(),
+                    token: secret,
+                },
+            ),
+        };
+        Ok(self
+            .probe_both(
+                &imap_config(&imap, pin),
+                &smtp_config(&smtp, pin),
+                &creds,
+                &smtp_login,
+            )
+            .await)
+    }
+
     async fn summary(&self, id: AccountId) -> Result<AccountSummary, AppError> {
         let account = self.store.get_account(id).await?;
         Ok(summary(account.id, &account.config))
@@ -369,6 +518,15 @@ where
         let secrets = Arc::clone(&self.secrets);
         blocking(move || {
             mail_auth::store_password(secrets.as_ref(), id, &password).map_err(AppError::from)
+        })
+        .await
+        .map_err(|e| e.for_account(id))
+    }
+
+    async fn save_client_secret(&self, id: AccountId, secret: Secret) -> Result<(), AppError> {
+        let secrets = Arc::clone(&self.secrets);
+        blocking(move || {
+            mail_auth::store_client_secret(secrets.as_ref(), id, &secret).map_err(AppError::from)
         })
         .await
         .map_err(|e| e.for_account(id))
@@ -391,31 +549,39 @@ where
         valid: &Valid,
         password: &Secret,
     ) -> TestReport {
-        let imap_cfg = imap_config(&config.imap, valid.pin);
-        let smtp_cfg = SmtpConfig {
-            host: config.smtp.host.trim().to_string(),
-            port: config.smtp.port,
-            security: match config.smtp.security {
-                Security::Tls => mail_smtp::Security::Tls,
-                Security::Starttls => mail_smtp::Security::StartTls,
-            },
-            pinned_cert_sha256: valid.pin,
-            connect_timeout: mail_imap::CONNECT_TIMEOUT,
-        };
         let username = config.username.trim();
         let creds = Credentials::Password {
             username: username.to_string(),
             password: mail_imap::Secret::new(password.expose()),
         };
+        let smtp_login = SmtpLogin::Password {
+            username: username.to_string(),
+            password: password.expose().to_string(),
+        };
+        self.probe_both(
+            &imap_config(&config.imap, valid.pin),
+            &smtp_config(&config.smtp, valid.pin),
+            &creds,
+            &smtp_login,
+        )
+        .await
+    }
+
+    /// Both halves of Test connection, concurrently.
+    async fn probe_both(
+        &self,
+        imap_cfg: &ConnectConfig,
+        smtp_cfg: &SmtpConfig,
+        creds: &Credentials,
+        smtp_login: &SmtpLogin,
+    ) -> TestReport {
         let imap = async {
-            let mut session = self.imap.connect(&imap_cfg, &creds).await?;
+            let mut session = self.imap.connect(imap_cfg, creds).await?;
             let folders = session.list().await?.len();
             let _ = session.logout().await;
             Ok::<usize, mail_imap::ImapError>(folders)
         };
-        let smtp = self
-            .smtp
-            .check_login(&smtp_cfg, username, password.expose());
+        let smtp = self.smtp.check_login(smtp_cfg, smtp_login);
         let (imap, smtp) = tokio::join!(imap, smtp);
         let (folders, imap_error) = match imap {
             Ok(n) => (n, None),
@@ -437,13 +603,22 @@ struct Valid {
     pin_hex: Option<String>,
 }
 
-fn validate(config: &AccountConfig) -> Result<Valid, AppError> {
-    if config.auth_kind == AuthKind::OauthGoogle {
-        return Err(AppError::new(
-            ErrorCode::Unsupported,
-            "Google sign-in is not available yet",
-        ));
+/// A client secret the form sent, trimmed; an empty one is no secret.
+fn client_secret(secret: Option<&Secret>) -> Option<Secret> {
+    secret
+        .map(|s| s.expose().trim())
+        .filter(|s| !s.is_empty())
+        .map(Secret::new)
+}
+
+fn auth_kind_of(k: mail_store::AuthKind) -> AuthKind {
+    match k {
+        mail_store::AuthKind::Password => AuthKind::Password,
+        mail_store::AuthKind::OauthGoogle => AuthKind::OauthGoogle,
     }
+}
+
+fn validate(config: &AccountConfig) -> Result<Valid, AppError> {
     mail_auth::split_address(&config.email)?;
     for (what, ep) in [("IMAP", &config.imap), ("SMTP", &config.smtp)] {
         let host = ep.host.trim();
@@ -506,6 +681,19 @@ fn imap_config(ep: &Endpoint, pin: Option<[u8; 32]>) -> ConnectConfig {
     }
 }
 
+fn smtp_config(ep: &Endpoint, pin: Option<[u8; 32]>) -> SmtpConfig {
+    SmtpConfig {
+        host: ep.host.trim().to_string(),
+        port: ep.port,
+        security: match ep.security {
+            Security::Tls => mail_smtp::Security::Tls,
+            Security::Starttls => mail_smtp::Security::StartTls,
+        },
+        pinned_cert_sha256: pin,
+        connect_timeout: mail_imap::CONNECT_TIMEOUT,
+    }
+}
+
 fn endpoint_from_auth(ep: &mail_auth::Endpoint) -> Endpoint {
     Endpoint {
         host: ep.host.clone(),
@@ -547,10 +735,8 @@ fn summary(id: AccountId, a: &NewAccount) -> AccountSummary {
             security: core_security(a.smtp_security),
         },
         username: a.username.clone(),
-        auth_kind: match a.auth_kind {
-            mail_store::AuthKind::Password => AuthKind::Password,
-            mail_store::AuthKind::OauthGoogle => AuthKind::OauthGoogle,
-        },
+        auth_kind: auth_kind_of(a.auth_kind),
+        oauth_client_id: a.oauth_client_id.clone(),
         pinned_cert_sha256: a.pinned_cert_sha256.clone(),
         enabled: a.enabled,
         sync_days: a.sync_days,
