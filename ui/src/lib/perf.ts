@@ -67,6 +67,44 @@ export function scrollBenchmark(scroller: HTMLElement, frames: number, step: num
   });
 }
 
+/** Waits for the reading pane's body frame of the message titled `subject` to load. */
+function frameLoaded(subject: string, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    const start = performance.now();
+    const check = () => {
+      const heading = document.querySelector("h2")?.textContent ?? "";
+      const frame = document.querySelector("iframe");
+      if (heading === subject && frame) {
+        frame.addEventListener("load", () => resolve(), { once: true });
+        setTimeout(resolve, 1500);
+        return;
+      }
+      if (performance.now() - start > timeoutMs) {
+        resolve();
+        return;
+      }
+      setTimeout(check, 50);
+    };
+    check();
+  });
+}
+
+/** T19's CI harness (SPEC_GAPS G68): when asked, opens every message of the folder in turn,
+ * lets each body load and settle, and reports the subjects it opened. */
+export function answerWalkRequests(open: (index: number) => Promise<string | null>, count: () => number): void {
+  listen("zeromail-perf-walk", async () => {
+    const opened: string[] = [];
+    for (let i = 0; i < count(); i++) {
+      const subject = await open(i);
+      if (subject === null) continue;
+      await frameLoaded(subject, 5000);
+      await new Promise((r) => setTimeout(r, 400));
+      opened.push(subject);
+    }
+    emit("zeromail-perf-walk-result", { opened }).catch(() => {});
+  }).catch(() => {});
+}
+
 /** When the harness asks, benchmark the scroller `find` returns and report back. */
 export function answerScrollRequests(find: () => HTMLElement | null): void {
   listen("zeromail-perf-scroll", () => {

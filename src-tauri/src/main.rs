@@ -39,6 +39,8 @@ struct CoreState(Arc<AppCore>);
 const PERF_OUT_ENV: &str = "ZEROMAIL_PERF_OUT";
 /// Set by the perf harness: also run the scroll benchmark.
 const PERF_SCROLL_ENV: &str = "ZEROMAIL_PERF_SCROLL";
+/// Set by T19's CI harness: open every message of the inbox in turn (SPEC_GAPS G68).
+const PERF_WALK_ENV: &str = "ZEROMAIL_PERF_WALK";
 /// Set by the perf harness and tests: a data directory instead of the OS app-data one.
 const DATA_DIR_ENV: &str = "ZEROMAIL_DATA_DIR";
 
@@ -274,6 +276,7 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
             .permission("core:event:allow-emit"),
     )?;
     let scroll = std::env::var_os(PERF_SCROLL_ENV).is_some();
+    let walk = std::env::var_os(PERF_WALK_ENV).is_some();
     let startup = Arc::new(std::sync::Mutex::new(0u128));
     let handle = app.handle().clone();
     let (out_ready, startup_ready) = (out.clone(), Arc::clone(&startup));
@@ -282,7 +285,9 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
         if let Ok(mut s) = startup_ready.lock() {
             *s = ms;
         }
-        if scroll {
+        if walk {
+            let _ = handle.emit("zeromail-perf-walk", ());
+        } else if scroll {
             let _ = handle.emit("zeromail-perf-scroll", ());
         } else {
             let json = format!("{{\"startup_ms\":{ms},\"ui\":{}}}\n", event.payload());
@@ -291,6 +296,14 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
             }
             handle.exit(0);
         }
+    });
+    let (handle, out_walk) = (app.handle().clone(), out.clone());
+    app.listen("zeromail-perf-walk-result", move |event| {
+        let json = format!("{{\"walk\":{}}}\n", event.payload());
+        if std::fs::write(&out_walk, json).is_err() {
+            eprintln!("perf: could not write the result");
+        }
+        handle.exit(0);
     });
     let handle = app.handle().clone();
     app.listen("zeromail-perf-scroll-result", move |event| {

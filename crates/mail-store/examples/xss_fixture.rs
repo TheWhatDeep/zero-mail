@@ -4,6 +4,10 @@
 //! webview and counts outbound requests.
 //!
 //!   cargo run -p mail-store --example xss_fixture -- <data dir> tests/fixtures/xss/corpus.html
+//!       [beacon base, for example http://127.0.0.1:48619]
+//!
+//! With a beacon base, every `http://beacon.invalid` in the corpus points there instead, so
+//! the CI harness's local server sees anything that leaves the webview (SPEC_GAPS G68).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
@@ -15,7 +19,10 @@ use mail_store::*;
 async fn main() {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().expect("usage: xss_fixture <data dir> <corpus>"));
-    let corpus = std::fs::read_to_string(args.next().expect("corpus path")).unwrap();
+    let mut corpus = std::fs::read_to_string(args.next().expect("corpus path")).unwrap();
+    if let Some(beacon) = args.next() {
+        corpus = corpus.replace("http://beacon.invalid", beacon.trim_end_matches('/'));
+    }
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("mail.db");
     for suffix in ["", "-wal", "-shm"] {

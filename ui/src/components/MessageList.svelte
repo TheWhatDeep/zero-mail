@@ -8,7 +8,7 @@
   import { isToday } from "../lib/format";
   import { commands, type FolderView, type Row } from "../lib/ipc";
   import { PageCache } from "../lib/pages";
-  import { answerScrollRequests, markInboxReady } from "../lib/perf";
+  import { answerScrollRequests, answerWalkRequests, markInboxReady } from "../lib/perf";
   import {
     earlierHeaderTop,
     hasEarlierHeader,
@@ -168,6 +168,13 @@
     rowHeight = cssPx("--row-height", 50);
     headerHeight = cssPx("--list-header-height", 41);
     answerScrollRequests(() => scroller ?? null);
+    answerWalkRequests(
+      async (i) => {
+        await move(i);
+        return cache?.row(i)?.subject ?? null;
+      },
+      () => folder.total,
+    );
     if (!scroller) return;
     const el = scroller;
     const resize = new ResizeObserver(() => (viewport = el.clientHeight));
