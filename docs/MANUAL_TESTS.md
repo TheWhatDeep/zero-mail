@@ -12,3 +12,5 @@ Record each run as: date, build tag, OS, result, notes.
 
 | Date | Tag | OS | Test | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
+| 2026-10-20 | m8 | Windows 10 | T31 | Pass | Workspace account, Internal Desktop-app client; release build b9595f0 |
+| 2026-10-20 | m8 | Windows 10 | T32 | Pass | Revoked at myaccount.google.com, restarted; signed in again with nothing lost |

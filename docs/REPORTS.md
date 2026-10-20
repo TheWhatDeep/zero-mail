@@ -669,3 +669,57 @@ None from spec v0.16.
 - **G63–G66, G69:** resolved by the owner.
 - **G67** (interpretations, owner to ratify): quoting, rich text, contacts, the undo window, the retry schedule, outgoing HTML, the arguments of `compose.new` and `draft.add_attachment`, Edit as `outbox.undo`, the plain part, the close flush, forward-as-attachment in draft uploads, signatures until M10, and the timing test hook.
 - **Found by review:** the composer's HTML first went through the display sanitizer, which would have sent `href="#"` links and `mail-remote://` images. It now has its own outgoing variant, with a test.
+
+## M8: done, tagged `m8` (2026-10-20)
+
+Scope: OAuth, Google XOAUTH2 end to end. Done when: T31 and T32. Both are manual; the owner ran them on the Windows release build with his own Internal Desktop-app client on his Workspace account (SPEC_GAPS G25), and both passed.
+
+Every check below passes locally on Windows 10. CI is green on Windows, in the Stalwart job and in the startup and T19 harness ([run 39386372547](https://github.com/TheWhatDeep/zero-mail/actions/runs/39386372547)).
+
+### Built
+- **`auth` (`mail-auth/src/oauth.rs`), with the `oauth2` crate:**
+  - Google sign-in: PKCE S256, loopback redirect to `127.0.0.1` on a random port, scope `https://mail.google.com/`, `access_type=offline`, `prompt=consent` and `login_hint`.
+  - The loopback listener accepts only a `GET` carrying the request's `state` and waits at most 5 minutes. It answers with a one-line page served with `default-src 'none'`.
+  - The code exchange and refresh go to Google's token endpoint through `reqwest` (`HttpPost`). The client secret travels only in that request body.
+- **Tokens (section 5):** `KeychainLogins` keeps access tokens in memory only. It refreshes 5 minutes before expiry, one refresh at a time per account. The refresh token and the client secret (G70) live in the keychain.
+  - A refused grant or client is `auth_failed`: `NeedsAttention`, no retry.
+  - Google out of reach is `network`: Backoff for the account, `retry_wait` for a send (G72).
+- **`mail-core`:**
+  - `account.add` and `account.update` take the Google client ID and secret. An OAuth account is saved first and runs no test (G71).
+  - `account.oauth_start` returns the consent URL. When the redirect comes back, Core exchanges the code, saves the tokens and reconnects the actor. It then runs Test connection over XOAUTH2 (IMAP plus `LIST`, SMTP `AUTH`) and fires `oauth-done`.
+  - Removing an account drops its token and any sign-in in progress.
+- **Sync and outbox:** logins carry the account's method and client ID (`LoginRequest`). IMAP and SMTP authenticate with `XOAUTH2`. The SMTP connection check now takes either login (`SmtpLogin`).
+- **`app`:** the `account.oauth_start` command opens the consent page in the system browser through the opener plugin; capability file updated.
+- **UI:**
+  - Sign-in method choice: Google first where the IMAP host is Google's. That includes hosts typed into the manual form, because a Workspace custom domain resolves to nothing (G27, G72).
+  - Client ID and secret fields, Save and sign in with Google, a waiting hint, and `oauth-done` handling.
+  - Cancelling a new form removes the account it saved.
+  - Sign in again on an OAuth account opens the same form.
+
+### Tests added (14 local Rust and 2 UI; workspace total 226 Rust (8 container tests ignored locally) and 57 UI)
+- **`mail-auth`:**
+  - The consent URL (PKCE, loopback, scope, offline access, no secret in it).
+  - The code exchange through a fake token endpoint: verifier, secret and redirect URI sent; a forged `state` ignored; the listener closed afterwards.
+  - A denied consent; a timed-out sign-in; refresh errors classified; the 5-minute margin; redirect parsing.
+  - Logins served from the in-memory token until near expiry, with nothing but the client secret and refresh token in the keychain; a revoked grant drops the cached token.
+- **`mail-core` on the fakes (`tests/oauth.rs`):**
+  - **T31:** saved before sign-in with no connection, signed in through the loopback, synced and sent over XOAUTH2. The access token, refresh token and client secret appear nowhere in the data folder.
+  - **T31 refresh:** after a restart the token is refreshed with no user action and serves IMAP and SMTP.
+  - **T32:** revoked: one refused refresh, `NeedsAttention`, no retries, the password account keeps syncing. Signing in again restores mail, the draft and a scheduled outbox item.
+  - An unreachable token endpoint gives Backoff and `retry_wait`, and both recover.
+  - A denied consent reports `oauth`; a second start replaces the first; the method cannot change on edit; removing the account deletes its keychain entries.
+- **UI:** the OAuth form fields and config; methods offered by the typed IMAP host.
+- **Manual (owner):** T31 and T32 passed (docs/MANUAL_TESTS.md run log).
+
+### Deviations
+None from spec v0.18. v0.17 and v0.18 record the owner's decisions G23, G70, G71 and G73.
+
+### Gaps found
+- **G70, G71:** resolved by the owner. Google's token endpoint needs the Desktop client's secret, and an OAuth account is saved before its sign-in.
+- **G23:** decided before M9: `bcc:` through local Bcc lists.
+- **G72** (interpretations, owner to ratify): refresh timing, error classes, the consent request, the loopback rules, the test after sign-in, editing an OAuth account, and the setup form's method choice by host.
+- **G73:** the owner decided Zero Mail is a public app. A new M11 (verified Google client, Microsoft OAuth, MX discovery, updates) goes before packaging, now M12.
+- **Found by the owner's run:** the manual form offered no Google sign-in for a Workspace custom domain. It now offers the method by the typed IMAP host.
+- **Found by CI:** a test read the database while SQLite still held its Windows file lock; it now waits for the lock to clear.
+- **Size to watch:** the release exe is 22.1 MB, up from 16.2 MB at M4. `oauth2` brings `chrono`, `url` and second copies of `rand` and `sha2`. The 15 MB budget is for the compressed installer, measured at M12.
+
