@@ -598,7 +598,7 @@ None from spec v0.15. v0.14 and v0.15 record the owner's decisions G58–G61 and
 
 Scope: `smtp`, `outbox`, compose window, drafts, identities, contacts. Done when: T10 to T18.
 
-Every check below passes locally on Windows 10. CI: see the end of this entry.
+Every check below passes locally on Windows 10. CI is green on Windows, in the Stalwart job (with the new M7 container test) and in the startup and T19 harness ([run 39371601137](https://github.com/TheWhatDeep/zero-mail/actions/runs/39371601137)).
 
 ### Built
 - **`smtp`:**
