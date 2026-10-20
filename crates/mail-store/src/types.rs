@@ -8,6 +8,7 @@ pub type ThreadId = i64;
 pub type MessageId = i64;
 pub type IdentityId = i64;
 pub type AttachmentId = i64;
+pub type OpId = i64;
 
 /// Transport security for an endpoint. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,6 +291,99 @@ pub struct NewAttachment {
     pub size: u64,
     pub content_id: Option<String>,
     pub is_inline: bool,
+}
+
+/// An op's local effect on its rows' flags (invariant 2): bits set and bits cleared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overlay {
+    pub add: u8,
+    pub remove: u8,
+}
+
+impl Overlay {
+    /// A pending move or delete hides its rows (SPEC_GAPS G59).
+    pub const HIDE: Overlay = Overlay {
+        add: Flags::DELETED,
+        remove: 0,
+    };
+
+    pub fn is_empty(self) -> bool {
+        self.add == 0 && self.remove == 0
+    }
+
+    pub fn apply(self, flags: Flags) -> Flags {
+        Flags((flags.0 | self.add) & !self.remove)
+    }
+}
+
+/// Where a pending op is (`pending_ops.state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpState {
+    Queued,
+    /// The actor is sending it now.
+    Running,
+    /// The server acted; kept for the Undo window (SPEC_GAPS G62).
+    Done,
+}
+
+impl OpState {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_sql(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// A new `pending_ops` row. `kind` and `args` belong to `ops`; the store keeps them as
+/// they are.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewOp {
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub uids: Vec<u32>,
+    pub kind: String,
+    pub args: serde_json::Value,
+    pub overlay: Overlay,
+}
+
+/// The local half of a folder op, written in the op's own transaction so a LIST never sees
+/// one without the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderChange {
+    Create(NewFolder),
+    Rename { folder_id: FolderId, to: String },
+    Delete { folder_id: FolderId },
+}
+
+/// A stored pending op.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingOp {
+    pub id: OpId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub uids: Vec<u32>,
+    pub kind: String,
+    pub args: serde_json::Value,
+    /// What the server answered (for example COPYUID), once done.
+    pub result: serde_json::Value,
+    /// The Undo group: the first op of the command that queued it.
+    pub group: OpId,
+    pub overlay: Overlay,
+    pub state: OpState,
+    pub attempts: u32,
+    pub last_error: String,
+    pub created_at: i64,
 }
 
 /// A stored attachment row (section 8: metadata only; the bytes are fetched on demand).

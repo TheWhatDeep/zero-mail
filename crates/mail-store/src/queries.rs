@@ -437,13 +437,16 @@ pub(crate) fn apply_folder_list(
         let rows = stmt.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         rows.collect::<rusqlite::Result<_>>()?
     };
+    // A folder op not yet acknowledged wins over the LIST (section 6, Conflicts): a folder
+    // created or renamed here stays, and one deleted or renamed away is not brought back.
+    let (protected, withdrawn) = pending_folder_ops(tx, account_id)?;
     for (id, path) in &known {
-        if !listed.iter().any(|f| &f.path == path) {
+        if !listed.iter().any(|f| &f.path == path) && !protected.contains(id) {
             delete_folder(tx, *id)?;
         }
     }
     for f in listed {
-        if !known.iter().any(|(_, path)| *path == f.path) {
+        if !known.iter().any(|(_, path)| *path == f.path) && !withdrawn.contains(&f.path) {
             insert_folder(tx, f)?;
         }
     }
@@ -456,6 +459,45 @@ pub(crate) fn apply_folder_list(
 /// Records UIDVALIDITY the first time a folder is selected, before any message is cached,
 /// so a later change is always detected (invariant 1). A folder that already has one is
 /// left alone.
+/// Unfinished folder ops: the folders they keep (created or renamed here) and the paths
+/// they withdraw (deleted, or renamed away).
+fn pending_folder_ops(
+    tx: &Transaction,
+    account_id: AccountId,
+) -> Result<(Vec<FolderId>, Vec<String>)> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT kind, folder_id, args_json FROM pending_ops
+         WHERE account_id = ?1 AND state != 'done'
+           AND kind IN ('folder_create', 'folder_rename', 'folder_delete')",
+    )?;
+    let rows = stmt.query_map([account_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, FolderId>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut protected = Vec::new();
+    let mut withdrawn = Vec::new();
+    for row in rows {
+        let (kind, folder_id, args) = row?;
+        let args: serde_json::Value = serde_json::from_str(&args)?;
+        let path = args["args"]["path"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        match kind.as_str() {
+            "folder_create" => protected.push(folder_id),
+            "folder_rename" => {
+                protected.push(folder_id);
+                withdrawn.push(path);
+            }
+            _ => withdrawn.push(path),
+        }
+    }
+    Ok((protected, withdrawn))
+}
+
 pub(crate) fn set_uidvalidity(
     tx: &Transaction,
     folder_id: FolderId,
@@ -538,6 +580,9 @@ pub(crate) fn apply_flags(
     for (uid, flags) in changes {
         changed += update.execute(params![folder_id, uid, flags.0])?;
     }
+    // Pending ops win until acknowledged (invariant 2): their overlays go back on in the
+    // same transaction, so no reader ever sees the server's flags alone.
+    crate::ops::relay(tx, folder_id)?;
     Ok(changed)
 }
 

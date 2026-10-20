@@ -542,3 +542,54 @@ None from spec v0.15. v0.13 records the owner's decisions G52–G54 and G56; v0.
 - **G68:** resolved by the owner: T19's webview half runs in CI as a walk against a local beacon server. Found because the DevTools harness passed here and could not start on the runner.
 - **G55 and G57** (interpretations, owner to ratify): Windows-safe file names; the proxy's overall limit of 4; `images=1` only with consent; `mailto` inert until M7; the link host rule; where logs, cache and temp files live; the debug setting and what the traces redact.
 - **For later (not in M5's scope):** the proxy fetches whatever host an allowed image names, as a browser would, including the local network; blocking private addresses would be a spec change. Read state after 1.5 s needs `message.set_flags` (M6).
+
+## M6: done, tagged `m6` (2026-10-20)
+
+Scope: `ops` (flags, move, delete, archive, folders, undo, Gmail quirks) and `folder.extend_window` (G51). Done when: T03, T06, T25 (rows and Archive; the views part moves to M9, G60), T26, T27 and T28.
+
+Every check below passes locally on Windows 10. CI: pending at commit time; recorded when green.
+
+### Built
+- **The pending-op queue (`mail-store`):** each command writes its local change and its `pending_ops` row in one transaction. The local change is an overlay on the rows' flags: a star or read change sets its bit; a pending move, archive or delete sets bit 5, which every view already hides (G59). The flags each row had are saved with the op, so a cancel or a refusal restores exactly the overlay's bits. A server flag pull lays unfinished overlays back on in the same transaction (invariant 2), so a local change never flickers away. Finished moves stay as `done` with their COPYUID for the 10 s Undo window (G62). Ops of one command share an Undo group.
+- **`ops` (`mail-sync`):**
+  - Flags: `UID STORE +FLAGS.SILENT` / `-FLAGS.SILENT`, 500 UIDs per command.
+  - Move, Archive, Delete to Trash: `UID MOVE`; without MOVE, `UID COPY`, `\Deleted` and `UID EXPUNGE` of exactly those UIDs; without UIDPLUS a bare `EXPUNGE` only when `UID SEARCH DELETED` shows no other flagged message, else the source stays flagged and hidden (section 9, T26).
+  - Permanent delete and Empty Trash: `\Deleted` and the same expunge rule.
+  - Targets that vanished from the server are dropped silently. A permanent refusal reverts the overlay and fires `op-failed` once (G58); a transient error leaves the op queued.
+  - Folder create, rename and delete with modified UTF-7 names (T27). The local change and its op are one transaction; folder ops are pushed before the session's first `LIST`, and a `LIST` never drops a folder with an unacknowledged create or rename nor revives one with an unacknowledged delete (G62).
+  - The actor pushes ops ahead of folder syncs (worker priority 2), at every connect (section 6: push first), and in step 3 of each folder sync; ops left `running` by a crash run again.
+  - Load older (`folder.extend_window`, G51): 90 days before the oldest cached message; an empty stretch jumps to the next older message (G62).
+  - Gmail (section 9, G61): All Mail, Important and Starred start with sync off; Important and Starred are hidden in the sidebar while off. Archive moves to All Mail, removing only the INBOX label (T25).
+- **Undo (section 9):** a queued op is cancelled locally; a finished move goes back with COPYUID, or by `UID SEARCH HEADER Message-ID` without it (G62); a flag change is reversed; a permanent delete cannot be undone.
+- **`mail-core`:** `message.set_flags`, `message.move`, `message.delete` (messages, or a folder for Empty Trash), `message.archive`, `message.mark_all_read`, `message.undo`, `folder.create`, `folder.rename`, `folder.delete` (special-use folders refused), `folder.set_role` (one folder per role), `folder.set_sync`, `folder.set_watch` (at most 3), `folder.extend_window`; events `pending-count` and `op-failed`. `message.open` says whether Archive exists and whether Delete is permanent; `folder.list` marks hidden folders.
+- **`app`:** the thirteen commands, in the capability file.
+- **UI:**
+  - **Reading pane toolbar:** Archive (only with an archive folder), Delete (asks first when permanent), Star, Mark read/unread, Move to. Archive, Delete and Move show the 10 s Undo toast.
+  - **Read state:** a message shown 1.5 s is marked read, once per opening (section 8).
+  - **List:** Mark all read; Empty Trash or Junk with the count, asking first; Load older at the end.
+  - **Status bar:** the pending count. **Toasts:** Undo, and the op-failed message.
+  - **Account settings, Folders:** every folder with its role, sync and watch toggles, Rename and Delete where allowed, and New folder.
+  - The remote-images notice now wraps its buttons below the text (M5 polish found in a visual check).
+
+### Tests added (16 local Rust and 4 UI; workspace total 194 Rust (7 container tests ignored locally) and 44 UI)
+- **`mail-core` on the fakes:**
+  - **T03:** another client's read and a local star meet within 2 s with IDLE; pending returns to 0.
+  - **T06:** offline star, move and delete of 3 messages: the list changes at once, nothing reaches the server, pending is 3; after reconnect the server matches and pending is 0.
+  - **T25 (M6 part):** on the Gmail fake a message under INBOX and Work is two rows with one Message-ID; Archive moves to All Mail, Work keeps its row and All Mail holds one copy; Important and Starred start hidden and sync on shows them.
+  - **T26:** without MOVE (COPY, `\Deleted`, UID EXPUNGE, no bare EXPUNGE); without UIDPLUS with another `\Deleted` message present (nothing expunged, the source hidden); without UIDPLUS alone (one bare EXPUNGE).
+  - **T27:** `Café/日本語` created, renamed and deleted; the folder list matches the server; special-use delete, INBOX rename and duplicates refused.
+  - **T28:** Archive then Undo after the server acted, with UIDPLUS (COPYUID) and without (Message-ID), flags intact; and Undo while queued (nothing reaches the server).
+  - A refused move is reverted and reported once as `op-failed` with `server_rejected`.
+  - Load older: 90 days per click, and a gap is jumped.
+  - Mark all read, Empty Trash, role override, the watch limit, sync off.
+- **`mail-store`:** overlays laid, laid again after a pull, lifted on cancel and failure; Undo groups; done ops keep their result and are purged; pending folder ops win over `LIST`.
+- **Stalwart:** `Café/日本語 …` created, renamed and deleted through the real transport, and Delete to Trash then Undo with the star intact.
+- **UI:** move targets, hidden folders, the permanent-delete rule, Empty, folder edit rules, the read delay.
+
+### Deviations
+None from spec v0.15. v0.14 and v0.15 record the owner's decisions G58–G61 and G63–G66, G68.
+
+### Gaps found
+- **G58–G61:** resolved by the owner (see above).
+- **G62** (interpretations, owner to ratify): Undo's done rows and groups, Gmail Archive target, delete confirmation, Load older's window, read state, single selection, the Message-ID search, folder ops and LIST, flag pulls in one transaction, which folders G61 hides, and Undo of flag changes.
+- **Races found and fixed by the tests:** a `LIST` in flight could drop a folder created a moment before; a flag pull could briefly hide a fresh star; Undo by Message-ID could run before the destination synced. Each now has a test.

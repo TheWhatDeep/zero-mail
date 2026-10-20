@@ -289,6 +289,156 @@ async fn m5_html_cid_images_and_attachments_through_the_real_transport() {
     core.shutdown().await;
 }
 
+async fn m6_server_has(probe: &mut mail_imap::ImapSession, path: String) -> bool {
+    probe.list().await.unwrap().iter().any(|f| f.path == path)
+}
+
+async fn m6_in_inbox(probe: &mut mail_imap::ImapSession, subject: String) -> Vec<u32> {
+    probe.select("INBOX").await.unwrap();
+    probe
+        .uid_search(&mail_imap::SearchKey::Subject(subject))
+        .await
+        .unwrap()
+}
+
+/// M6 through the real transport (T27, T28): a `Café/日本語` folder is created, renamed and
+/// deleted with modified UTF-7 names, and a message moved to Trash comes back with Undo
+/// (Stalwart answers COPYUID), its star intact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the Stalwart container; runs in CI"]
+async fn m6_unicode_folders_and_undo_through_the_real_transport() {
+    use mail_core::views::{ListRequest, Scope};
+    use mail_core::{Core, CoreConfig, CoreEvent, EventSink, StateName};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new("stalwart-m6");
+    let accounts = service(&dir).await;
+    let pin_hex = fingerprint(&accounts).await;
+    drop(accounts);
+    let pin = mail_imap::parse_fingerprint(&pin_hex).unwrap();
+    let imap_config = ConnectConfig {
+        host: HOST.into(),
+        port: IMAPS,
+        security: mail_imap::Security::Tls,
+        pinned_cert_sha256: Some(pin),
+        connect_timeout: mail_imap::CONNECT_TIMEOUT,
+    };
+    let creds = Credentials::Password {
+        username: "alice".into(),
+        password: Secret::new("alice-test-pw"),
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("m6-{nanos}");
+    let mut probe = ImapClient.connect(&imap_config, &creds).await.unwrap();
+    let raw = format!(
+        "Message-ID: <{subject}@tests.local>\r\nFrom: Bob <bob@test.local>\r\nTo: alice@test.local\r\n\
+         Subject: {subject}\r\n\r\nUndo me.\r\n"
+    );
+    probe
+        .append("INBOX", &[mail_imap::Flag::Flagged], raw.as_bytes())
+        .await
+        .unwrap();
+
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let sink: EventSink = Arc::new(move |e| log.lock().unwrap().push(e));
+    let core = Core::start(
+        CoreConfig {
+            data_dir: dir.path().join("core"),
+            secrets: secrets() as Arc<dyn SecretStore>,
+            imap: ImapClient,
+            smtp: SmtpClient,
+            http: NoHttp,
+        },
+        sink,
+    )
+    .await
+    .unwrap();
+    let mut c = config("alice", "alice-test-pw", false);
+    c.pinned_cert_sha256 = Some(pin_hex);
+    let account = core.account_add(c).await.unwrap().id;
+    let start = Instant::now();
+    let deadline = Duration::from_secs(90);
+    while !events.lock().unwrap().iter().any(|e| {
+        matches!(e, CoreEvent::AccountState { state: StateName::Idle, account_id, .. } if *account_id == account)
+    }) {
+        assert!(start.elapsed() < deadline, "never idle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // T27: the folder round-trips through the server's LIST.
+    let name = format!("Café/日本語 {nanos}");
+    let renamed = format!("Café/日本語 {nanos} 2");
+    core.folder_create(account, &name).await.unwrap();
+    while !m6_server_has(&mut probe, name.clone()).await {
+        assert!(start.elapsed() < deadline, "never created");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    core.folder_rename(account, &name, &renamed).await.unwrap();
+    while !m6_server_has(&mut probe, renamed.clone()).await {
+        assert!(start.elapsed() < deadline, "never renamed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(!m6_server_has(&mut probe, name.clone()).await);
+    core.folder_delete(account, &renamed).await.unwrap();
+    while m6_server_has(&mut probe, renamed.clone()).await {
+        assert!(start.elapsed() < deadline, "never deleted");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // T28 on a real server: Delete moves to Trash; Undo brings it back with its star.
+    let folders = core.folder_list(account).await.unwrap();
+    let inbox = folders
+        .iter()
+        .find(|f| f.path.eq_ignore_ascii_case("INBOX"))
+        .unwrap()
+        .id;
+    let message = loop {
+        let page = core
+            .list_page(ListRequest {
+                scope: Scope::Folder { folder_id: inbox },
+                cursor: None,
+                limit: 500,
+                group_by_thread: false,
+            })
+            .await
+            .unwrap();
+        if let Some(row) = page.rows.iter().find(|r| r.subject == subject) {
+            assert!(row.flagged);
+            break row.id;
+        }
+        assert!(start.elapsed() < deadline, "never listed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let op = core.message_delete(&[message], None).await.unwrap();
+    while !m6_in_inbox(&mut probe, subject.clone()).await.is_empty() {
+        assert!(start.elapsed() < deadline, "never moved");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    core.message_undo(op).await.unwrap();
+    let uid = loop {
+        if let Some(uid) = m6_in_inbox(&mut probe, subject.clone()).await.first() {
+            break *uid;
+        }
+        assert!(start.elapsed() < deadline, "never came back");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let flags = probe
+        .uid_fetch_flags(&mail_imap::UidSet::single(uid), None)
+        .await
+        .unwrap();
+    assert!(
+        flags.updates[0].flags.contains(&mail_imap::Flag::Flagged),
+        "star intact"
+    );
+    core.shutdown().await;
+    probe.logout().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "needs the Stalwart container; runs in CI"]
 async fn t09_wrong_password_needs_attention_and_others_keep_working() {

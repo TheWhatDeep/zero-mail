@@ -67,6 +67,10 @@ enum Command {
     FetchBody(MessageId, Reply<()>),
     /// A part's decoded bytes; an empty part id is the raw message source.
     FetchPart(MessageId, String, Reply<Vec<u8>>),
+    /// New ops were queued for this folder (`None`: folder ops).
+    OpsQueued(Option<FolderId>),
+    /// Load older: 90 more days (`folder.extend_window`).
+    Extend(FolderId),
     OpenFolder(Option<FolderId>),
     AccountChanged,
     Retry,
@@ -117,6 +121,16 @@ impl AccountHandle {
             Reply(Some(tx)),
         ));
         rx
+    }
+
+    /// Ops were queued: push them ahead of folder syncs (worker queue priority 2).
+    pub fn ops_queued(&self, folder_id: Option<FolderId>) {
+        let _ = self.commands.send(Command::OpsQueued(folder_id));
+    }
+
+    /// `folder.extend_window`: fetch the 90 days before the folder's oldest cached message.
+    pub fn extend_window(&self, folder_id: FolderId) {
+        let _ = self.commands.send(Command::Extend(folder_id));
     }
 
     /// The folder open in the UI: it syncs now and every 5 minutes while open.
@@ -195,12 +209,11 @@ enum Wake {
     Go,
 }
 
-/// Worker queue priorities (section 6): 1 user requests, 2 pending ops (M6), 3 folder
-/// sync, 4 prefetch.
+/// Worker queue priorities (section 6): 1 user requests, 2 pending ops, 3 folder sync,
+/// 4 prefetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Priority {
     User = 0,
-    #[allow(dead_code)] // Pending ops arrive in M6.
     Ops = 1,
     Sync = 2,
     Prefetch = 3,
@@ -219,6 +232,12 @@ enum Job {
     Open(MessageId, Reply<()>),
     /// A part (or the source) the user is waiting for.
     Part(MessageId, String, Reply<Vec<u8>>),
+    /// Push one folder's message ops.
+    Ops(FolderId),
+    /// Push the account's folder ops (create, rename, delete).
+    FolderOps,
+    /// Load older for one folder.
+    Extend(FolderId),
 }
 
 impl Job {
@@ -228,6 +247,8 @@ impl Job {
             (Job::Body { item: a, .. }, Job::Body { item: b, .. }) => a.message_id == b.message_id,
             (Job::Open(a, _), Job::Open(b, _)) => a == b,
             (Job::Part(a, p, _), Job::Part(b, q, _)) => a == b && p == q,
+            (Job::Ops(a), Job::Ops(b)) | (Job::Extend(a), Job::Extend(b)) => a == b,
+            (Job::FolderOps, Job::FolderOps) => true,
             _ => false,
         }
     }
@@ -433,8 +454,15 @@ where
                     None | Some(Command::Shutdown) => return Wake::Shutdown,
                     Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                     Some(Command::OpenFolder(f)) => self.open_folder = f,
-                    // Offline: the waiting caller's channel closes.
-                    Some(Command::Refresh(_) | Command::FetchBody(..) | Command::FetchPart(..)) => {}
+                    // Offline: the waiting caller's channel closes; queued ops wait in the
+                    // store for the next connection.
+                    Some(
+                        Command::Refresh(_)
+                        | Command::FetchBody(..)
+                        | Command::FetchPart(..)
+                        | Command::OpsQueued(_)
+                        | Command::Extend(_),
+                    ) => {}
                 },
             }
         }
@@ -447,7 +475,13 @@ where
                 None | Some(Command::Shutdown) => return Wake::Shutdown,
                 Some(Command::AccountChanged | Command::Retry) => return Wake::Go,
                 Some(Command::OpenFolder(f)) => self.open_folder = f,
-                Some(Command::Refresh(_) | Command::FetchBody(..) | Command::FetchPart(..)) => {}
+                Some(
+                    Command::Refresh(_)
+                    | Command::FetchBody(..)
+                    | Command::FetchPart(..)
+                    | Command::OpsQueued(_)
+                    | Command::Extend(_),
+                ) => {}
             }
         }
     }
@@ -497,11 +531,39 @@ where
             sync_days: account.config.sync_days,
             caps: &caps,
         };
-        let folders = match sync_folder_list(&mut worker, &ctx).await {
+        // Push first (section 6): every op queued while offline, ahead of the pulls. Folder
+        // ops go before LIST, which would otherwise drop a folder created here or bring back
+        // one deleted here.
+        if let Err(e) = deps.store.requeue_running_ops(account_id).await {
+            return failed(e.into());
+        }
+        let _ = deps
+            .store
+            .purge_done_ops(now() - crate::UNDO_WINDOW_SECS)
+            .await;
+        if let Err(e) =
+            crate::ops::run_folder_ops_account(&mut worker, &deps.store, &deps.events, account_id)
+                .await
+        {
+            return failed(e);
+        }
+        let mut folders = match sync_folder_list(&mut worker, &ctx).await {
             Ok(f) => f,
             Err(e) => return failed(e),
         };
         let mut queue = Queue::default();
+        match deps.store.account_ops(account_id).await {
+            Ok(ops) => {
+                for op in ops {
+                    if crate::ops::is_folder_op(&op) {
+                        queue.push(Priority::Ops, Job::FolderOps);
+                    } else {
+                        queue.push(Priority::Ops, Job::Ops(op.folder_id));
+                    }
+                }
+            }
+            Err(e) => return failed(e.into()),
+        }
         for id in sync_order(&folders) {
             queue.push(Priority::Sync, Job::Sync(id));
         }
@@ -569,7 +631,16 @@ where
                     None,
                 );
                 let was_inbox = matches!(job, Job::Sync(id) if Some(id) == inbox);
-                match run_job(job, &mut worker, &ctx, &mut selected, &mut queue).await {
+                match run_job(
+                    job,
+                    &mut worker,
+                    &ctx,
+                    &mut selected,
+                    &mut queue,
+                    &mut folders,
+                )
+                .await
+                {
                     Ok(()) => inbox_done |= was_inbox,
                     // One folder or message failed; the connection is fine.
                     Err(e) if e.class() == ErrorClass::Permanent => {
@@ -633,6 +704,13 @@ where
             Command::FetchBody(id, reply) => queue.push(Priority::User, Job::Open(id, reply)),
             Command::FetchPart(id, part, reply) => {
                 queue.push(Priority::User, Job::Part(id, part, reply));
+            }
+            Command::OpsQueued(Some(id)) => queue.push(Priority::Ops, Job::Ops(id)),
+            Command::OpsQueued(None) => queue.push(Priority::Ops, Job::FolderOps),
+            Command::Extend(id) => {
+                if ours(id) {
+                    queue.push(Priority::User, Job::Extend(id));
+                }
             }
             Command::OpenFolder(f) => {
                 self.open_folder = f;
@@ -704,19 +782,58 @@ async fn ensure_selected<T: ImapTransport>(
     Ok(true)
 }
 
+/// Queues a sync of each folder an op touched, when it is one of the account's synced
+/// folders.
+fn queue_followups(queue: &mut Queue, folders: &[Folder], sync: &[FolderId]) {
+    for id in sync {
+        if folders.iter().any(|f| f.id == *id && f.sync_enabled) {
+            queue.push(Priority::Sync, Job::Sync(*id));
+        }
+    }
+}
+
 async fn run_job<T: ImapTransport>(
     job: Job,
     t: &mut T,
     ctx: &Ctx<'_>,
     selected: &mut Option<FolderId>,
     queue: &mut Queue,
+    folders: &mut Vec<Folder>,
 ) -> Result<(), SyncError> {
     match job {
         Job::Sync(folder_id) => {
             *selected = None;
-            sync_folder(t, ctx, folder_id).await?;
+            let follow = sync_folder(t, ctx, folder_id).await?;
             *selected = Some(folder_id);
+            queue_followups(queue, folders, &follow);
             queue.push(Priority::Prefetch, Job::Prefetch(folder_id));
+        }
+        Job::Ops(folder_id) => {
+            let folder = ctx.store.get_folder(folder_id).await?;
+            if !ensure_selected(t, &folder, selected, queue).await? {
+                return Ok(());
+            }
+            let follow =
+                crate::ops::run_folder_ops(t, ctx.store, ctx.events, ctx.account_id, &folder)
+                    .await?;
+            queue_followups(queue, folders, &follow.sync);
+        }
+        Job::FolderOps => {
+            if crate::ops::run_folder_ops_account(t, ctx.store, ctx.events, ctx.account_id).await? {
+                *selected = None;
+                *folders = sync_folder_list(t, ctx).await?;
+                for f in folders
+                    .iter()
+                    .filter(|f| f.sync_enabled && f.synced_at == 0)
+                {
+                    queue.push(Priority::Sync, Job::Sync(f.id));
+                }
+            }
+        }
+        Job::Extend(folder_id) => {
+            *selected = None;
+            crate::folder::extend_window(t, ctx, folder_id).await?;
+            *selected = Some(folder_id);
         }
         Job::Prefetch(folder_id) => {
             let folder = ctx.store.get_folder(folder_id).await?;

@@ -149,6 +149,8 @@ struct Folder {
     highest_modseq: u64,
     /// Bumped on every change, so IDLE wakes only for its own folder.
     version: u64,
+    /// LIST attributes beyond the role, such as Gmail's `\Important`.
+    attributes: Vec<String>,
 }
 
 impl Folder {
@@ -161,6 +163,7 @@ impl Folder {
             vanished: Vec::new(),
             highest_modseq: 1,
             version: 0,
+            attributes: Vec::new(),
         }
     }
 }
@@ -331,6 +334,13 @@ impl FakeServer {
         s.folders
             .entry(path.to_string())
             .or_insert_with(|| Folder::new(validity, special_use));
+    }
+
+    /// Adds LIST attributes to a folder, for example Gmail's `\Important` (section 9).
+    pub fn set_attributes(&self, path: &str, attributes: &[&str]) -> Result<(), ImapError> {
+        self.lock().folder_mut(path)?.attributes =
+            attributes.iter().map(|a| (*a).to_string()).collect();
+        Ok(())
     }
 
     /// Delivers a message, as if by SMTP or another client. Returns its UID.
@@ -527,10 +537,11 @@ impl FakeTransport {
                     other if self.caps.special_use => other,
                     _ => None,
                 };
-                let attributes = role
+                let mut attributes: Vec<String> = role
                     .filter(|r| *r != SpecialUse::Inbox)
                     .map(|r| vec![r.as_attribute().to_string()])
                     .unwrap_or_default();
+                attributes.extend(f.attributes.iter().cloned());
                 let status = self.caps.list_status.then(|| MailboxStatus {
                     messages: f.messages.len() as u32,
                     unseen: f
@@ -1231,6 +1242,7 @@ fn matches(key: &SearchKey, uid: u32, m: &FakeMessage) -> bool {
         SearchKey::Cc(t) => header_value(&m.raw, "cc").contains(&t.to_lowercase()),
         SearchKey::Bcc(t) => header_value(&m.raw, "bcc").contains(&t.to_lowercase()),
         SearchKey::Subject(t) => header_value(&m.raw, "subject").contains(&t.to_lowercase()),
+        SearchKey::Header(name, t) => header_value(&m.raw, name).contains(&t.to_lowercase()),
         SearchKey::Seen => has(&Flag::Seen),
         SearchKey::Unseen => !has(&Flag::Seen),
         SearchKey::Flagged => has(&Flag::Flagged),

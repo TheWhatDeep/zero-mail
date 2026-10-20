@@ -9,6 +9,7 @@
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
   import { addressList, formatSize, personName, readerDateText, subjectText } from "../lib/format";
+  import { READ_DELAY_MS, deleteNeedsConfirm, moveTargets } from "../lib/actions";
   import { commands, toAppError, type AppError, type Attachment } from "../lib/ipc";
   import { bodyUrl, decideLink, type LinkAction } from "../lib/links";
   import { platformUrl, usesHttpScheme } from "../lib/protocol";
@@ -28,6 +29,10 @@
   /** An executable attachment waiting for confirmation before Open. */
   let pendingOpen = $state<Attachment | null>(null);
   let actionError = $state<AppError | null>(null);
+  /** A permanent delete waiting for confirmation (section 9). */
+  let confirmDelete = $state(false);
+  /** The message the read timer already ran for: it marks read once per opening. */
+  let autoReadFor: number | null = null;
   const http = typeof navigator !== "undefined" && usesHttpScheme(navigator.userAgent);
 
   async function open(id: number): Promise<void> {
@@ -51,6 +56,8 @@
     pendingLink = null;
     pendingOpen = null;
     actionError = null;
+    confirmDelete = false;
+    autoReadFor = null;
     app.hoveredLink = null;
     if (id === null) {
       reader = emptyReader;
@@ -66,6 +73,36 @@
     const n = app.changeCount(s.view.account_id, s.view.folder_id);
     if (n > 0 && app.message === s.view.id) void open(s.view.id);
   });
+
+  // Read state (section 8): shown for 1.5 s, an unread message is marked read, once.
+  $effect(() => {
+    const s = reader;
+    if (s.kind !== "open" || !s.view.unread || s.view.body_kind === "loading" || autoReadFor === s.view.id) return;
+    const id = s.view.id;
+    const timer = setTimeout(() => {
+      if (app.message !== id || autoReadFor === id) return;
+      autoReadFor = id;
+      void app.act(() => commands["message.set_flags"]([id], { seen: true }));
+    }, READ_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
+
+  /** Archive, delete or move: the row leaves at once, with a 10 s Undo toast (section 9). */
+  async function undoable(run: () => Promise<number>, text: string, undo = true): Promise<void> {
+    let op: number | undefined;
+    const ok = await app.act(async () => {
+      op = await run();
+    });
+    if (ok && op !== undefined) {
+      app.toast(text, undo ? op : undefined);
+      app.message = null;
+    }
+  }
+
+  function remove(id: number, permanent: boolean): void {
+    confirmDelete = false;
+    void undoable(() => commands["message.delete"]([id]), permanent ? strings.deletedToast : strings.trashedToast, !permanent);
+  }
 
   /** Runs a command; a failure shows in the pane, a cancelled dialog shows nothing. */
   async function run(action: () => Promise<unknown>): Promise<void> {
@@ -126,6 +163,7 @@
   });
 
   const view = $derived(reader.kind === "open" ? reader.view : null);
+  const targets = $derived(view ? moveTargets(app.folders[view.account_id] ?? [], view.folder_id) : []);
 </script>
 
 <section class="card" aria-label={strings.readerLabel}>
@@ -137,6 +175,64 @@
     <div class="body">
       {#if reader.kind === "open" && reader.deleted}
         <p class="notice" role="status"><Icon name="trash" size="--icon-14" /> {strings.deleted}</p>
+      {/if}
+      {#if !(reader.kind === "open" && reader.deleted)}
+        <div class="toolbar" role="toolbar" aria-label={strings.actionsLabel}>
+          {#if view.can_archive}
+            <button class="small tint press" onclick={() => undoable(() => commands["message.archive"]([view.id]), strings.archivedToast)}>
+              <Icon name="archive" size="--icon-14" />{strings.archive}
+            </button>
+          {/if}
+          <button
+            class="small tint press"
+            onclick={() => (deleteNeedsConfirm(view) ? (confirmDelete = true) : remove(view.id, false))}
+          >
+            <Icon name="trash" size="--icon-14" />{strings.delete}
+          </button>
+          <button
+            class="small tint press"
+            aria-pressed={view.flagged}
+            onclick={() => app.act(() => commands["message.set_flags"]([view.id], { flagged: !view.flagged }))}
+          >
+            <Icon name={view.flagged ? "starFill" : "star"} size="--icon-14" />{view.flagged ? strings.unstar : strings.star}
+          </button>
+          <button
+            class="small tint press"
+            onclick={() => {
+              autoReadFor = view.id;
+              void app.act(() => commands["message.set_flags"]([view.id], { seen: view.unread }));
+            }}
+          >
+            {view.unread ? strings.markRead : strings.markUnread}
+          </button>
+          {#if targets.length > 0}
+            <select
+              class="small move"
+              aria-label={strings.moveTo}
+              value=""
+              onchange={(e) => {
+                const to = Number((e.currentTarget as HTMLSelectElement).value);
+                const name = targets.find((f) => f.id === to)?.name ?? "";
+                (e.currentTarget as HTMLSelectElement).value = "";
+                if (to) void undoable(() => commands["message.move"]([view.id], to), strings.movedToast(name));
+              }}
+            >
+              <option value="" disabled>{strings.moveToPlaceholder}</option>
+              {#each targets as f (f.id)}
+                <option value={f.id}>{f.path}</option>
+              {/each}
+            </select>
+          {/if}
+        </div>
+        {#if confirmDelete}
+          <div class="notice confirm" role="alertdialog" aria-label={strings.deleteForever}>
+            <span class="text">{strings.deleteForeverConfirm}</span>
+            <span class="actions">
+              <button class="small tint press" onclick={() => remove(view.id, true)}>{strings.deleteForever}</button>
+              <button class="small tint press" onclick={() => (confirmDelete = false)}>{strings.cancel}</button>
+            </span>
+          </div>
+        {/if}
       {/if}
       <h2 class="subject">{subjectText(view.subject)}</h2>
       <div class="sender">
@@ -201,8 +297,7 @@
         {/if}
         {#if view.remote_images === "blocked" && !plain}
           <div class="notice" role="status">
-            <Icon name="lockSimple" size="--icon-14" />
-            <span class="text">{strings.imagesBlocked}</span>
+            <span class="text with-icon"><Icon name="lockSimple" size="--icon-14" />{strings.imagesBlocked}</span>
             <span class="actions">
               <button class="small tint press" onclick={() => allowImages(false)}>{strings.loadImages}</button>
               <button class="small tint press" onclick={() => allowImages(true)}>{strings.alwaysLoadImages}</button>
@@ -354,14 +449,36 @@
   }
 
   .notice .text {
-    flex: 1;
+    flex: 1 1 100%;
     min-width: 0;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
+  }
+
+  .with-icon {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-8);
   }
 
   .actions {
     display: flex;
     gap: var(--space-6);
+  }
+
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-6);
+  }
+
+  .toolbar .small {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-6);
+  }
+
+  .move {
+    max-width: 100%;
   }
 
   .small {

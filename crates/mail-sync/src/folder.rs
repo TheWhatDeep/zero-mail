@@ -50,11 +50,16 @@ pub(crate) async fn sync_folder_list<T: ImapTransport>(
                 path: f.path.clone(),
                 delimiter: f.delimiter.map(String::from).unwrap_or_default(),
                 special_use,
-                sync_enabled: !(ctx.caps.gmail && special_use == Some(SpecialUse::All)),
+                // Gmail: All Mail duplicates every message; Important and Starred are
+                // virtual and hidden by default (section 9; SPEC_GAPS G61).
+                sync_enabled: !(ctx.caps.gmail
+                    && (special_use == Some(SpecialUse::All) || gmail_virtual(f))),
                 watch_idle: false,
             }
         })
         .collect();
+    // Unacknowledged folder ops win over this LIST; the store applies that rule in the
+    // same transaction (section 6, Conflicts).
     let after = ctx.store.apply_folder_list(ctx.account_id, rows).await?;
     let paths = |v: &[Folder]| v.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
     if paths(&before) != paths(&after) {
@@ -64,6 +69,13 @@ pub(crate) async fn sync_folder_list<T: ImapTransport>(
         });
     }
     Ok(after)
+}
+
+/// Gmail's `\Important` and `\Flagged` (Starred) folders.
+fn gmail_virtual(f: &mail_imap::MailboxInfo) -> bool {
+    f.attributes
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case("\\Important") || a.eq_ignore_ascii_case("\\Flagged"))
 }
 
 /// First sync and after every reconnect: INBOX, then Drafts, Sent and Archive, then the
@@ -85,12 +97,13 @@ pub(crate) fn sync_order(folders: &[Folder]) -> Vec<FolderId> {
     enabled.into_iter().map(|f| f.id).collect()
 }
 
-/// Section 6, steps 1–7, for one folder. Pending ops (step 3) arrive in M6.
+/// Section 6, steps 1–7, for one folder. Returns the folders its pushed ops touched, for
+/// the caller to sync.
 pub(crate) async fn sync_folder<T: ImapTransport>(
     t: &mut T,
     ctx: &Ctx<'_>,
     folder_id: FolderId,
-) -> Result<(), SyncError> {
+) -> Result<Vec<FolderId>, SyncError> {
     let store = ctx.store;
     let mut folder = store.get_folder(folder_id).await?;
 
@@ -110,7 +123,9 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
         folder = store.get_folder(folder_id).await?;
     }
 
-    // 3. Push first: this folder's pending ops (M6). None exist before then.
+    // 3. Push first: this folder's pending ops.
+    let follow =
+        crate::ops::run_folder_ops(t, ctx.store, ctx.events, ctx.account_id, &folder).await?;
 
     // 4. New mail, newest first, 100 per batch, one transaction per batch.
     let cached = store.cached_uids(folder_id).await?;
@@ -208,6 +223,10 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
         }
     }
 
+    // Pending ops win until acknowledged (section 6, Conflicts): their overlays go back on
+    // top of what the server said.
+    store.relay_ops(folder_id).await?;
+
     // 7. Counters and server state, then store-changed.
     store
         .finish_folder_sync(
@@ -217,6 +236,103 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
                 uidnext: info.uidnext,
                 highestmodseq: info.highest_modseq,
                 synced_at: now(),
+            },
+        )
+        .await?;
+    ctx.events.send(SyncEvent::StoreChanged {
+        account_id: ctx.account_id,
+        folder_id: Some(folder_id),
+    });
+    Ok(follow
+        .sync
+        .into_iter()
+        .filter(|f| *f != folder_id)
+        .collect())
+}
+
+/// Load older (`folder.extend_window`, sections 3 and 12; SPEC_GAPS G51, G62): fetches the
+/// headers of the 90 days before the folder's oldest cached message. When that range is
+/// empty on the server, it takes the 90 days before the next older message instead, so a
+/// quiet stretch never stops it.
+pub(crate) async fn extend_window<T: ImapTransport>(
+    t: &mut T,
+    ctx: &Ctx<'_>,
+    folder_id: FolderId,
+) -> Result<(), SyncError> {
+    let store = ctx.store;
+    let folder = store.get_folder(folder_id).await?;
+    let info = t.select(&folder.path).await?;
+    if folder.uidvalidity != 0 && folder.uidvalidity != info.uidvalidity {
+        // A changed mailbox: the regular sync purges and starts over.
+        return sync_folder(t, ctx, folder_id).await.map(|_| ());
+    }
+    let start = store
+        .oldest_internal(folder_id)
+        .await?
+        .unwrap_or_else(|| now() - i64::from(ctx.sync_days) * 86_400);
+    let day = 86_400;
+    let range = |end: i64| {
+        SearchKey::And(vec![
+            SearchKey::Since(ImapDate::from_epoch(end - crate::EXTEND_DAYS * day)),
+            SearchKey::Before(ImapDate::from_epoch(end + day)),
+        ])
+    };
+    let known: HashSet<u32> = store.cached_uids(folder_id).await?.into_iter().collect();
+    let fresh = |uids: Vec<u32>| -> Vec<u32> {
+        let mut v: Vec<u32> = uids.into_iter().filter(|u| !known.contains(u)).collect();
+        v.sort_unstable_by(|a, b| b.cmp(a));
+        v
+    };
+    let mut missing = fresh(t.uid_search(&range(start)).await?);
+    if missing.is_empty() {
+        // Nothing in the 90 days: start from the newest older message on the server.
+        let older = fresh(
+            t.uid_search(&SearchKey::Before(ImapDate::from_epoch(start)))
+                .await?,
+        );
+        if let Some(newest) = older.first() {
+            let h = t
+                .uid_fetch_headers(&UidSet::single(*newest), HeaderFetch::default())
+                .await?;
+            if let Some(h) = h.first() {
+                missing = fresh(t.uid_search(&range(h.internal_date)).await?);
+            }
+        }
+    }
+    let gmail = ctx.caps.gmail;
+    let total = missing.len();
+    let mut fetched = 0;
+    for batch in missing.chunks(FETCH_BATCH) {
+        let headers = t
+            .uid_fetch_headers(&UidSet::new(batch.iter().copied()), HeaderFetch { gmail })
+            .await?;
+        let rows: Vec<_> = headers
+            .iter()
+            .map(|h| convert::new_message(h, ctx.account_id, folder_id, now(), gmail))
+            .collect();
+        if !rows.is_empty() {
+            store.insert_synced(folder_id, rows).await?;
+        }
+        fetched += batch.len();
+        ctx.events.send(SyncEvent::SyncProgress {
+            account_id: ctx.account_id,
+            folder_id,
+            fetched: u32::try_from(fetched).unwrap_or(u32::MAX),
+            total: u32::try_from(total).unwrap_or(u32::MAX),
+        });
+        ctx.events.send(SyncEvent::StoreChanged {
+            account_id: ctx.account_id,
+            folder_id: Some(folder_id),
+        });
+    }
+    store
+        .finish_folder_sync(
+            folder_id,
+            FolderSyncState {
+                uidvalidity: info.uidvalidity,
+                uidnext: info.uidnext,
+                highestmodseq: folder.highestmodseq,
+                synced_at: folder.synced_at,
             },
         )
         .await?;

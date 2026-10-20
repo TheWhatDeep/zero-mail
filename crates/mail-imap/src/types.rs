@@ -431,6 +431,8 @@ pub enum SearchKey {
     Cc(String),
     Bcc(String),
     Subject(String),
+    /// `HEADER name value` (RFC 3501): Undo without COPYUID finds a message by Message-ID.
+    Header(String, String),
     Seen,
     Unseen,
     Flagged,

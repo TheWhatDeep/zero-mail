@@ -46,6 +46,9 @@
       {strings.backoffWarning(a.name || a.email, a.last_error ? errorText[a.last_error.code] : stateText.backoff)}
     </button>
   {/each}
+  {#if app.pending > 0}
+    <span class="pending" role="status">{strings.pending(app.pending)}</span>
+  {/if}
   {#if app.hoveredLink}
     <span class="link" aria-label={strings.linkTarget}>{app.hoveredLink}</span>
   {/if}
@@ -112,6 +115,10 @@
     font-size: inherit;
     color: inherit;
     cursor: pointer;
+  }
+
+  .pending {
+    white-space: nowrap;
   }
 
   .link {

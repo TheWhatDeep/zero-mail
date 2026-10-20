@@ -14,6 +14,7 @@ mail-store.workspace = true
 mail-auth.workspace = true
 mail-parser.workspace = true
 rand.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-move"
+description = "Enables the message_move command without any pre-configured scope."
+commands.allow = ["message_move"]
+
+[[permission]]
+identifier = "deny-message-move"
+description = "Denies the message_move command without any pre-configured scope."
+commands.deny = ["message_move"]

@@ -26,7 +26,7 @@ fn addresses(list: &[Address]) -> Vec<AddressView> {
 }
 
 /// A folder role (`folders.special_use`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Inbox,
@@ -36,6 +36,20 @@ pub enum Role {
     Junk,
     Trash,
     All,
+}
+
+impl From<Role> for SpecialUse {
+    fn from(r: Role) -> Self {
+        match r {
+            Role::Inbox => Self::Inbox,
+            Role::Drafts => Self::Drafts,
+            Role::Sent => Self::Sent,
+            Role::Archive => Self::Archive,
+            Role::Junk => Self::Junk,
+            Role::Trash => Self::Trash,
+            Role::All => Self::All,
+        }
+    }
 }
 
 impl From<SpecialUse> for Role {
@@ -70,6 +84,17 @@ pub struct FolderView {
     /// A full sync has completed once; before that an empty folder shows skeleton rows
     /// (section 11, States).
     pub synced: bool,
+    /// Gmail's Important and Starred while their sync is off: the sidebar omits them
+    /// (section 9; SPEC_GAPS G61).
+    pub hidden: bool,
+}
+
+/// Gmail's system folders live under `[Gmail]/` (or `[Google Mail]/`); the ones without a
+/// role there are the virtual Important and Starred (G61).
+pub fn gmail_virtual_hidden(f: &Folder) -> bool {
+    !f.sync_enabled
+        && f.special_use.is_none()
+        && (f.path.starts_with("[Gmail]/") || f.path.starts_with("[Google Mail]/"))
 }
 
 /// Folder list order (section 9): Inbox, Drafts, Sent, Archive, Junk, Trash pinned at the
@@ -136,6 +161,7 @@ pub fn folder_views(folders: &[Folder]) -> Vec<FolderView> {
                 sync_enabled: f.sync_enabled,
                 watch_idle: f.watch_idle,
                 synced: f.synced_at > 0,
+                hidden: gmail_virtual_hidden(f),
             }
         })
         .collect()
@@ -268,6 +294,8 @@ pub struct BodyInfo {
     pub has_html: bool,
     pub remote_images: RemoteImages,
     pub unreadable: bool,
+    pub can_archive: bool,
+    pub delete_is_permanent: bool,
 }
 
 /// `message.open`'s display model (section 3).
@@ -294,6 +322,10 @@ pub struct MessageView {
     pub body_url: String,
     pub attachments: Vec<AttachmentView>,
     pub remote_images: RemoteImages,
+    /// The account has an archive folder (section 9: otherwise Archive is hidden).
+    pub can_archive: bool,
+    /// Delete here is permanent and asks first (section 9).
+    pub delete_is_permanent: bool,
 }
 
 pub fn message_view(
@@ -338,7 +370,16 @@ pub fn message_view(
             })
             .collect(),
         remote_images: body.remote_images,
+        can_archive: body.can_archive,
+        delete_is_permanent: body.delete_is_permanent,
     }
+}
+
+/// `message.set_flags` values: what to set; a field left out is unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct FlagChange {
+    pub seen: Option<bool>,
+    pub flagged: Option<bool>,
 }
 
 #[cfg(test)]

@@ -2573,6 +2573,7 @@ dependencies = [
  "mail-store",
  "rand",
  "rusqlite",
+ "serde_json",
  "tokio",
  "tracing",
 ]

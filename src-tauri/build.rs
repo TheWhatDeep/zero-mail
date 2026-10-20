@@ -21,6 +21,19 @@ const COMMANDS: &[&str] = &[
     "message_save_source",
     "link_open",
     "log_open",
+    "message_set_flags",
+    "message_move",
+    "message_delete",
+    "message_archive",
+    "message_mark_all_read",
+    "message_undo",
+    "folder_create",
+    "folder_rename",
+    "folder_delete",
+    "folder_set_role",
+    "folder_set_sync",
+    "folder_set_watch",
+    "folder_extend_window",
 ];
 
 fn main() {

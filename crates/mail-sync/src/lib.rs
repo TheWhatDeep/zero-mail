@@ -14,6 +14,7 @@ pub mod backoff;
 mod body;
 mod convert;
 mod folder;
+pub mod ops;
 
 pub use actor::{spawn_account, AccountHandle, SyncDeps};
 pub use body::preview;
@@ -33,6 +34,10 @@ pub const OPEN_FOLDER_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const MAX_WATCHED: usize = 3;
 /// Bodies prefetched per folder: its newest messages (section 6, step 8).
 pub const PREFETCH_COUNT: u32 = 200;
+/// Undo stays available this long after an action (section 9: a 10 s toast).
+pub const UNDO_WINDOW_SECS: i64 = 10;
+/// Load older adds this many days per click (section 12).
+pub const EXTEND_DAYS: i64 = 90;
 
 /// Account states (section 6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +122,16 @@ pub enum SyncEvent {
     FolderReset {
         account_id: AccountId,
         folder_id: FolderId,
+    },
+    /// The number of unfinished ops may have changed (`pending-count`).
+    PendingChanged { account_id: AccountId },
+    /// The server refused an op for good; its overlay was reverted (SPEC_GAPS G58).
+    /// `op_id` is the Undo group the UI knows.
+    OpFailed {
+        account_id: AccountId,
+        op_id: mail_store::OpId,
+        kind: String,
+        error: SyncError,
     },
 }
 

@@ -108,6 +108,8 @@ export interface FolderView {
   watch_idle: boolean;
   /** A full sync has completed once. */
   synced: boolean;
+  /** Gmail's Important and Starred while their sync is off (SPEC_GAPS G61). */
+  hidden: boolean;
 }
 
 export interface Cursor {
@@ -188,7 +190,20 @@ export interface MessageView {
   body_url: string;
   attachments: Attachment[];
   remote_images: RemoteImages;
+  /** The account has an archive folder (section 9). */
+  can_archive: boolean;
+  /** Delete here is permanent and asks first (section 9). */
+  delete_is_permanent: boolean;
 }
+
+/** message.set_flags: a field left out is unchanged. */
+export interface FlagChange {
+  seen?: boolean;
+  flagged?: boolean;
+}
+
+/** pending_ops kinds, as op-failed reports them. */
+export type OpKind = "flags" | "move" | "expunge" | "folder_create" | "folder_rename" | "folder_delete";
 
 const ERROR_CODES: readonly ErrorCode[] = [
   "network",
@@ -256,6 +271,27 @@ export const commands = {
   "attachment.save": (attachment_id: number) => call<null>("attachment_save", { attachment_id, path: null }),
   "link.open": (url: string) => call<null>("link_open", { url }),
   "log.open": () => call<null>("log_open"),
+  "message.set_flags": (message_ids: number[], flags: FlagChange) =>
+    call<number>("message_set_flags", { message_ids, flags }),
+  "message.move": (message_ids: number[], folder_id: number) => call<number>("message_move", { message_ids, folder_id }),
+  /** Messages, or with folder_id and no messages, everything in the folder (Empty Trash). */
+  "message.delete": (message_ids: number[], folder_id: number | null = null) =>
+    call<number>("message_delete", { message_ids, folder_id }),
+  "message.archive": (message_ids: number[]) => call<number>("message_archive", { message_ids }),
+  "message.mark_all_read": (folder_id: number) => call<number>("message_mark_all_read", { folder_id }),
+  "message.undo": (op_id: number) => call<null>("message_undo", { op_id }),
+  "folder.create": (account_id: number, path: string) => call<null>("folder_create", { account_id, path }),
+  "folder.rename": (account_id: number, path: string, value: string) =>
+    call<null>("folder_rename", { account_id, path, value }),
+  "folder.delete": (account_id: number, path: string) => call<null>("folder_delete", { account_id, path }),
+  "folder.set_role": (account_id: number, path: string, value: Role | null) =>
+    call<null>("folder_set_role", { account_id, path, value }),
+  "folder.set_sync": (account_id: number, path: string, value: boolean) =>
+    call<null>("folder_set_sync", { account_id, path, value }),
+  "folder.set_watch": (account_id: number, path: string, value: boolean) =>
+    call<null>("folder_set_watch", { account_id, path, value }),
+  "folder.extend_window": (account_id: number, folder_id: number) =>
+    call<null>("folder_extend_window", { account_id, folder_id }),
 } as const;
 
 /** Event payloads (section 3, event table). */
@@ -265,6 +301,8 @@ export interface EventMap {
   "sync-progress": { account_id: number; folder_id: number; fetched: number; total: number };
   "folder-reset": { account_id: number; folder_id: number };
   "storage-warning": { kind: "disk_full" | "db_corrupt" };
+  "pending-count": { total: number };
+  "op-failed": { account_id: number; op_id: number; kind: OpKind; error: AppError };
 }
 
 export function on<K extends keyof EventMap>(name: K, handler: (payload: EventMap[K]) => void): Promise<UnlistenFn> {

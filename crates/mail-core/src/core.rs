@@ -71,7 +71,7 @@ impl From<AccountState> for StateName {
     }
 }
 
-fn sync_error(e: &SyncError) -> AppError {
+pub(crate) fn sync_error(e: &SyncError) -> AppError {
     match e {
         SyncError::Imap(e) => e.clone().into(),
         SyncError::Auth(e) => e.clone().into(),
@@ -115,6 +115,17 @@ pub enum CoreEvent {
     StorageWarning {
         kind: &'static str,
     },
+    /// Unfinished ops and outbox items (section 3).
+    PendingCount {
+        total: u32,
+    },
+    /// A queued action the server refused for good; it was reverted (SPEC_GAPS G58).
+    OpFailed {
+        account_id: AccountId,
+        op_id: i64,
+        kind: String,
+        error: AppError,
+    },
 }
 
 impl CoreEvent {
@@ -126,6 +137,8 @@ impl CoreEvent {
             Self::SyncProgress { .. } => "sync-progress",
             Self::FolderReset { .. } => "folder-reset",
             Self::StorageWarning { .. } => "storage-warning",
+            Self::PendingCount { .. } => "pending-count",
+            Self::OpFailed { .. } => "op-failed",
         }
     }
 }
@@ -153,12 +166,12 @@ impl<I, S, H> std::fmt::Debug for CoreConfig<I, S, H> {
 type States = Arc<Mutex<HashMap<AccountId, (StateName, Option<AppError>)>>>;
 
 pub struct Core<I, S, H> {
-    store: Store,
+    pub(crate) store: Store,
     accounts: Accounts<I, S, H>,
     deps: SyncDeps<I, KeychainLogins>,
-    actors: tokio::sync::Mutex<HashMap<AccountId, AccountHandle>>,
+    pub(crate) actors: tokio::sync::Mutex<HashMap<AccountId, AccountHandle>>,
     states: States,
-    sink: EventSink,
+    pub(crate) sink: EventSink,
     /// The delayed integrity check; cancelled at shutdown.
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     data_dir: PathBuf,
@@ -279,7 +292,12 @@ where
             images_once: Mutex::default(),
             unreadable: Arc::default(),
         });
-        tokio::spawn(pump(rx, Arc::clone(&sink), states));
+        tokio::spawn(pump(
+            rx,
+            Arc::clone(&sink),
+            states,
+            Some(core.store.clone()),
+        ));
         if rebuilt {
             sink(CoreEvent::StorageWarning { kind: "db_corrupt" });
         }
@@ -488,10 +506,16 @@ where
             }
             _ => RemoteImages::None,
         };
+        let folders = self.store.list_folders(message.account_id).await?;
+        let here = folders.iter().find(|f| f.id == message.folder_id);
         let info = BodyInfo {
             has_html,
             remote_images: remote,
             unreadable,
+            can_archive: crate::mailbox::archive_folder(&folders)
+                .is_some_and(|a| Some(a.id) != here.map(|h| h.id)),
+            delete_is_permanent: here
+                .is_none_or(|h| crate::mailbox::delete_is_permanent(&folders, h)),
         };
         Ok(views::message_view(&message, &attachments, info))
     }
@@ -755,7 +779,12 @@ async fn blocking<T: Send + 'static>(
 /// Forwards sync events to the UI. `store-changed` is coalesced per (account, folder) into
 /// 100 ms windows: the first change opens a window and every key changed in it is sent once
 /// when it closes, so a long sync updates the list at most ten times a second.
-async fn pump(mut rx: mpsc::UnboundedReceiver<SyncEvent>, sink: EventSink, states: States) {
+async fn pump(
+    mut rx: mpsc::UnboundedReceiver<SyncEvent>,
+    sink: EventSink,
+    states: States,
+    store: Option<Store>,
+) {
     let mut pending: BTreeSet<(AccountId, Option<FolderId>)> = BTreeSet::new();
     let mut deadline: Option<Instant> = None;
     loop {
@@ -822,6 +851,25 @@ async fn pump(mut rx: mpsc::UnboundedReceiver<SyncEvent>, sink: EventSink, state
                 account_id,
                 folder_id,
             }),
+            SyncEvent::PendingChanged { .. } => {
+                if let Some(Ok(total)) = match &store {
+                    Some(s) => Some(s.pending_count().await),
+                    None => None,
+                } {
+                    sink(CoreEvent::PendingCount { total });
+                }
+            }
+            SyncEvent::OpFailed {
+                account_id,
+                op_id,
+                kind,
+                error,
+            } => sink(CoreEvent::OpFailed {
+                account_id,
+                op_id,
+                kind,
+                error: sync_error(&error).for_account(account_id),
+            }),
         }
     }
 }
@@ -837,7 +885,7 @@ mod tests {
         let log = Arc::clone(&seen);
         let sink: EventSink = Arc::new(move |e| lock(&log).push((Instant::now(), e)));
         let start = Instant::now();
-        tokio::spawn(pump(rx, sink, Arc::default()));
+        tokio::spawn(pump(rx, sink, Arc::default(), None));
         for _ in 0..50 {
             tx.send(SyncEvent::StoreChanged {
                 account_id: 1,
@@ -875,7 +923,7 @@ mod tests {
         let log = Arc::clone(&seen);
         let states: States = Arc::default();
         let sink: EventSink = Arc::new(move |e| lock(&log).push(e));
-        let pumped = tokio::spawn(pump(rx, sink, Arc::clone(&states)));
+        let pumped = tokio::spawn(pump(rx, sink, Arc::clone(&states), None));
         tx.send(SyncEvent::AccountState {
             account_id: 4,
             state: AccountState::NeedsAttention,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-undo"
+description = "Enables the message_undo command without any pre-configured scope."
+commands.allow = ["message_undo"]
+
+[[permission]]
+identifier = "deny-message-undo"
+description = "Denies the message_undo command without any pre-configured scope."
+commands.deny = ["message_undo"]

@@ -7,6 +7,7 @@
 //! never see SQL or a connection.
 
 mod error;
+mod ops;
 mod queries;
 mod schema;
 mod types;
@@ -309,7 +310,8 @@ impl Store {
             .await
     }
 
-    /// Replaces flags by UID; returns how many rows changed.
+    /// Replaces flags by UID with the server's, then lays the folder's pending ops over
+    /// them in the same transaction (invariant 2); returns how many rows changed.
     pub async fn apply_flags(
         &self,
         folder_id: FolderId,
@@ -400,6 +402,141 @@ impl Store {
     /// `PRAGMA quick_check` on the writer; `Corrupt` when it fails (SPEC_GAPS G48).
     pub async fn quick_check(&self) -> Result<()> {
         self.write(|tx| queries::quick_check(tx)).await
+    }
+
+    /// Queues ops and lays their overlays in one transaction (section 9: every action
+    /// applies locally at once and is queued durably). Returns their ids; the first is the
+    /// Undo group.
+    pub async fn queue_ops(&self, ops: Vec<NewOp>, now: i64) -> Result<Vec<OpId>> {
+        self.write(move |tx| ops::queue_ops(tx, &ops, now)).await
+    }
+
+    /// A folder change and its op in one transaction (create, rename, delete).
+    pub async fn queue_folder_op(
+        &self,
+        change: FolderChange,
+        op: NewOp,
+        now: i64,
+    ) -> Result<(FolderId, OpId)> {
+        self.write(move |tx| ops::queue_folder_op(tx, &change, &op, now))
+            .await
+    }
+
+    pub async fn get_op(&self, op_id: OpId) -> Result<PendingOp> {
+        self.read(move |conn| ops::get_op(conn, op_id)).await
+    }
+
+    /// An account's queued and running ops, oldest first.
+    pub async fn account_ops(&self, account_id: AccountId) -> Result<Vec<PendingOp>> {
+        self.read(move |conn| ops::account_ops(conn, account_id))
+            .await
+    }
+
+    /// Every op of one Undo group, in any state.
+    pub async fn group_ops(&self, group: OpId) -> Result<Vec<PendingOp>> {
+        self.read(move |conn| ops::group_ops(conn, group)).await
+    }
+
+    /// Lays a folder's unfinished ops over its rows again after a server pull.
+    pub async fn relay_ops(&self, folder_id: FolderId) -> Result<()> {
+        self.write(move |tx| ops::relay(tx, folder_id)).await
+    }
+
+    /// Cancels a queued op and lifts its overlay; `false` when it is already running or done.
+    pub async fn cancel_op(&self, op_id: OpId) -> Result<bool> {
+        self.write(move |tx| ops::cancel_op(tx, op_id)).await
+    }
+
+    /// Drops a permanently failed op and lifts its overlay (section 9: reverted).
+    pub async fn fail_op(&self, op_id: OpId) -> Result<PendingOp> {
+        self.write(move |tx| ops::fail_op(tx, op_id)).await
+    }
+
+    /// Moves an op to `state`, recording the server's result or an error.
+    pub async fn set_op_state(
+        &self,
+        op_id: OpId,
+        state: OpState,
+        result: Option<serde_json::Value>,
+        error: Option<String>,
+    ) -> Result<()> {
+        self.write(move |tx| ops::set_op_state(tx, op_id, state, result.as_ref(), error.as_deref()))
+            .await
+    }
+
+    pub async fn delete_op(&self, op_id: OpId) -> Result<()> {
+        self.write(move |tx| ops::delete_op(tx, op_id)).await
+    }
+
+    /// Unfinished ops over every account (`pending-count`).
+    pub async fn pending_count(&self) -> Result<u32> {
+        self.read(ops::pending_count).await
+    }
+
+    /// Drops finished ops created before `before` (the Undo window has passed).
+    pub async fn purge_done_ops(&self, before: i64) -> Result<usize> {
+        self.write(move |tx| ops::purge_done(tx, before)).await
+    }
+
+    /// Ops left running by a crash are queued again.
+    pub async fn requeue_running_ops(&self, account_id: AccountId) -> Result<()> {
+        self.write(move |tx| ops::requeue_running(tx, account_id))
+            .await
+    }
+
+    pub async fn find_folder(&self, account_id: AccountId, path: &str) -> Result<FolderId> {
+        let path = path.to_string();
+        self.read(move |conn| ops::find_folder(conn, account_id, &path))
+            .await
+    }
+
+    pub async fn set_folder_role(
+        &self,
+        folder_id: FolderId,
+        role: Option<SpecialUse>,
+    ) -> Result<()> {
+        self.write(move |tx| ops::set_role(tx, folder_id, role))
+            .await
+    }
+
+    pub async fn set_folder_sync(&self, folder_id: FolderId, on: bool) -> Result<()> {
+        self.write(move |tx| ops::set_sync(tx, folder_id, on)).await
+    }
+
+    pub async fn set_folder_watch(&self, folder_id: FolderId, on: bool) -> Result<()> {
+        self.write(move |tx| ops::set_watch(tx, folder_id, on))
+            .await
+    }
+
+    /// Renames a folder and its subtree locally.
+    pub async fn rename_folder(&self, folder_id: FolderId, to: &str) -> Result<()> {
+        let to = to.to_string();
+        self.write(move |tx| ops::rename_folder(tx, folder_id, &to))
+            .await
+    }
+
+    pub async fn unread_uids(&self, folder_id: FolderId) -> Result<Vec<u32>> {
+        self.read(move |conn| ops::unread_uids(conn, folder_id))
+            .await
+    }
+
+    pub async fn visible_uids(&self, folder_id: FolderId) -> Result<Vec<u32>> {
+        self.read(move |conn| ops::visible_uids(conn, folder_id))
+            .await
+    }
+
+    pub async fn oldest_internal(&self, folder_id: FolderId) -> Result<Option<i64>> {
+        self.read(move |conn| ops::oldest_internal(conn, folder_id))
+            .await
+    }
+
+    pub async fn uids_by_message_id(
+        &self,
+        folder_id: FolderId,
+        ids: Vec<String>,
+    ) -> Result<Vec<u32>> {
+        self.read(move |conn| ops::uids_by_message_id(conn, folder_id, &ids))
+            .await
     }
 
     /// One page of a folder, newest first by `(date, id)`, after `cursor`.

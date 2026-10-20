@@ -5,6 +5,7 @@
   // system does not trust is shown with its fingerprint and can be pinned (section 5,
   // Certificates). Edit mode is the same form; it is how the user signs in again.
   import { untrack } from "svelte";
+  import FolderSettings from "./FolderSettings.svelte";
   import { pop } from "../lib/motion";
   import {
     certificateToPin,
@@ -285,6 +286,9 @@
       </div>
     {/if}
   </form>
+  {#if initial}
+    <FolderSettings accountId={initial.id} />
+  {/if}
 </div>
 
 <style>

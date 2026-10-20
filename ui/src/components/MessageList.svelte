@@ -5,6 +5,7 @@
   // and "Earlier" headers. An ARIA listbox: arrow keys, Home and End move the selection.
   import { onMount, untrack } from "svelte";
   import MessageRow from "./MessageRow.svelte";
+  import { canEmpty } from "../lib/actions";
   import { isToday } from "../lib/format";
   import { commands, type FolderView, type Row } from "../lib/ipc";
   import { PageCache } from "../lib/pages";
@@ -38,6 +39,8 @@
   let now = $state(new Date());
   let cache: PageCache | null = null;
   let cacheFolder = -1;
+  /** Empty Trash waiting for confirmation (section 9). */
+  let confirmEmpty = $state(false);
 
   const layout: Layout = $derived({ rowHeight, headerHeight, total: folder.total, todayCount });
   const range = $derived(visibleRange(scrollTop, viewport, layout, OVERSCAN));
@@ -85,6 +88,7 @@
     cache = new PageCache(fetchPage(id));
     todayCount = null;
     selectedIndex = null;
+    confirmEmpty = false;
     now = new Date();
     untrack(() => {
       if (scroller) scroller.scrollTop = 0;
@@ -185,6 +189,32 @@
 </script>
 
 <section class="card" aria-label={strings.listLabel}>
+  {#if folder.unread > 0 || canEmpty(folder)}
+    <div class="bar">
+      {#if confirmEmpty}
+        <span class="confirm" role="alertdialog" aria-label={strings.emptyFolder(folder.name)}>
+          <span class="text">{strings.emptyConfirm(folder.total, folder.name)}</span>
+          <button
+            class="small tint press"
+            onclick={() => {
+              confirmEmpty = false;
+              void app.act(() => commands["message.delete"]([], folder.id));
+            }}>{strings.deleteForever}</button
+          >
+          <button class="small tint press" onclick={() => (confirmEmpty = false)}>{strings.cancel}</button>
+        </span>
+      {:else}
+        {#if folder.unread > 0}
+          <button class="small tint press" onclick={() => app.act(() => commands["message.mark_all_read"](folder.id))}>
+            {strings.markAllRead}
+          </button>
+        {/if}
+        {#if canEmpty(folder)}
+          <button class="small tint press" onclick={() => (confirmEmpty = true)}>{strings.emptyFolder(folder.name)}</button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
   <div
     class="scroller"
     bind:this={scroller}
@@ -241,6 +271,13 @@
         {/each}
       </div>
     {/if}
+    {#if folder.synced}
+      <div class="more">
+        <button class="small tint press" onclick={() => app.act(() => commands["folder.extend_window"](folder.account_id, folder.id))}>
+          {strings.loadOlder}
+        </button>
+      </div>
+    {/if}
   </div>
 </section>
 
@@ -254,6 +291,46 @@
     border-radius: var(--radius-card);
     box-shadow: var(--shadow-control);
     overflow: hidden;
+  }
+
+  .bar {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: var(--space-6);
+    padding: var(--space-6) var(--space-8);
+    border-bottom: 1px solid var(--color-divider);
+  }
+
+  .confirm {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    min-width: 0;
+  }
+
+  .confirm .text {
+    font-size: var(--text-meta);
+    color: var(--color-text-muted-strong);
+  }
+
+  .small {
+    --tint: var(--color-button-hover);
+    height: var(--button-height-small);
+    padding: 0 var(--space-10);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-small-button);
+    background: var(--color-secondary-bg);
+    color: var(--color-secondary-fg);
+    font-size: var(--text-meta);
+    font-weight: var(--font-weight-medium);
+    white-space: nowrap;
+  }
+
+  .more {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-12);
   }
 
   .scroller {

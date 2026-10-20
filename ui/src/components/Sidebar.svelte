@@ -4,6 +4,7 @@
   // returns that order). Items of later milestones are not shown (SPEC_GAPS G45).
   import Icon from "./Icon.svelte";
   import type { IconName } from "../lib/icons";
+  import { visibleFolders } from "../lib/actions";
   import type { FolderView, Role } from "../lib/ipc";
   import { app } from "../state/app.svelte";
   import { strings } from "../strings";
@@ -39,7 +40,7 @@
           {account.name || account.email}
         </button>
         <ul>
-          {#each app.folders[account.id] ?? [] as folder (folder.id)}
+          {#each visibleFolders(app.folders[account.id] ?? []) as folder (folder.id)}
             <li>
               <button
                 class="item tint"

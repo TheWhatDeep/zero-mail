@@ -613,6 +613,7 @@ fn search_cmd(cmd: Cmd, key: &SearchKey) -> Cmd {
         SearchKey::Cc(s) => cmd.text("CC ").string(s),
         SearchKey::Bcc(s) => cmd.text("BCC ").string(s),
         SearchKey::Subject(s) => cmd.text("SUBJECT ").string(s),
+        SearchKey::Header(name, value) => cmd.text(format!("HEADER {name} ")).string(value),
         SearchKey::Seen => cmd.text("SEEN"),
         SearchKey::Unseen => cmd.text("UNSEEN"),
         SearchKey::Flagged => cmd.text("FLAGGED"),

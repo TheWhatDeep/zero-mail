@@ -40,6 +40,10 @@
     {#each app.toasts as t (t.id)}
       <div class="toast" role="status" transition:pop>
         <span>{t.text}</span>
+        {#if t.undo !== undefined}
+          {@const op = t.undo}
+          <button class="toast-action press" onclick={() => app.undo(t.id, op)}>{strings.undo}</button>
+        {/if}
         <button class="toast-button" onclick={() => app.dismissToast(t.id)} aria-label={strings.dismiss}>
           <Icon name="x" size="--icon-14" />
         </button>
@@ -116,6 +120,16 @@
     background: var(--color-toast-bg);
     color: var(--color-toast-fg);
     box-shadow: var(--shadow-overlay);
+  }
+
+  .toast-action {
+    height: var(--icon-button-28);
+    padding: 0 var(--space-12);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--color-toast-button-border);
+    background: var(--color-toast-button-bg);
+    color: inherit;
+    font-weight: var(--font-weight-medium);
   }
 
   .toast-button {

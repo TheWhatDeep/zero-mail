@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mail_core::views::{FolderView, ListRequest, MessageView, PageView};
+use mail_core::views::{FlagChange, FolderView, ListRequest, MessageView, PageView, Role};
 use mail_core::{
     AccountConfig, AccountSummary, AccountView, AppError, Candidate, Core, CoreConfig, CoreEvent,
     ErrorCode, EventSink, HttpClient, ImapClient, Keychain, SmtpClient, TestReport,
@@ -231,6 +231,121 @@ async fn log_open(app: AppHandle, core: tauri::State<'_, CoreState>) -> Result<(
         .map_err(os_error)
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn message_set_flags(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    flags: FlagChange,
+) -> Result<i64, AppError> {
+    core.0.message_set_flags(&message_ids, flags).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_move(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    folder_id: i64,
+) -> Result<i64, AppError> {
+    core.0.message_move(&message_ids, folder_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_delete(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    folder_id: Option<i64>,
+) -> Result<i64, AppError> {
+    core.0.message_delete(&message_ids, folder_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_archive(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+) -> Result<i64, AppError> {
+    core.0.message_archive(&message_ids).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_mark_all_read(
+    core: tauri::State<'_, CoreState>,
+    folder_id: i64,
+) -> Result<i64, AppError> {
+    core.0.message_mark_all_read(folder_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_undo(core: tauri::State<'_, CoreState>, op_id: i64) -> Result<(), AppError> {
+    core.0.message_undo(op_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_create(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+) -> Result<(), AppError> {
+    core.0.folder_create(account_id, &path).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_rename(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+    value: String,
+) -> Result<(), AppError> {
+    core.0.folder_rename(account_id, &path, &value).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_delete(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+) -> Result<(), AppError> {
+    core.0.folder_delete(account_id, &path).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_set_role(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+    value: Option<Role>,
+) -> Result<(), AppError> {
+    core.0.folder_set_role(account_id, &path, value).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_set_sync(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+    value: bool,
+) -> Result<(), AppError> {
+    core.0.folder_set_sync(account_id, &path, value).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_set_watch(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    path: String,
+    value: bool,
+) -> Result<(), AppError> {
+    core.0.folder_set_watch(account_id, &path, value).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn folder_extend_window(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    folder_id: i64,
+) -> Result<(), AppError> {
+    core.0.folder_extend_window(account_id, folder_id).await
+}
+
 /// `mail-body://localhost/<message>?images=0|1&plain=0|1` (section 8, step 3; SPEC_GAPS
 /// G53): the message id and the query. The CSP is a response header, never a meta tag.
 fn mail_body_request(uri: &tauri::http::Uri) -> Option<(i64, String)> {
@@ -395,6 +510,19 @@ fn main() {
             message_save_source,
             link_open,
             log_open,
+            message_set_flags,
+            message_move,
+            message_delete,
+            message_archive,
+            message_mark_all_read,
+            message_undo,
+            folder_create,
+            folder_rename,
+            folder_delete,
+            folder_set_role,
+            folder_set_sync,
+            folder_set_watch,
+            folder_extend_window,
         ])
         .build(tauri::generate_context!());
 

@@ -204,6 +204,8 @@ describe("reader", () => {
     body_kind: "plain",
     truncated: false,
     has_html: false,
+    can_archive: true,
+    delete_is_permanent: false,
     body_url: `mail-body://localhost/${id}?images=0`,
     attachments: [],
     remote_images: "none",

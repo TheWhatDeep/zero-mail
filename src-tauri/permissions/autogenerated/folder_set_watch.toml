@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-folder-set-watch"
+description = "Enables the folder_set_watch command without any pre-configured scope."
+commands.allow = ["folder_set_watch"]
+
+[[permission]]
+identifier = "deny-folder-set-watch"
+description = "Denies the folder_set_watch command without any pre-configured scope."
+commands.deny = ["folder_set_watch"]

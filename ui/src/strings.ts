@@ -1,7 +1,7 @@
 // Every user-visible string lives here (BUILD.md section 11, Accessibility: English only,
 // all strings in one file). Components import from this module and never inline text.
 
-import type { AccountState, ErrorCode } from "./lib/ipc";
+import type { AccountState, ErrorCode, OpKind, Role } from "./lib/ipc";
 
 export const strings = {
   appName: "Zero Mail",
@@ -63,9 +63,47 @@ export const strings = {
   executableWarning: (name: string) => `${name} can run programs on this computer. Open it anyway?`,
   openAnyway: "Open anyway",
 
+  // Message actions (section 9)
+  actionsLabel: "Message actions",
+  archive: "Archive",
+  delete: "Delete",
+  star: "Star",
+  unstar: "Remove star",
+  markRead: "Mark read",
+  markUnread: "Mark unread",
+  moveTo: "Move to",
+  moveToPlaceholder: "Move to…",
+  deleteForever: "Delete permanently",
+  deleteForeverConfirm: "Delete this message permanently? This cannot be undone.",
+  archivedToast: "Archived.",
+  trashedToast: "Moved to Trash.",
+  deletedToast: "Deleted.",
+  movedToast: (folder: string) => `Moved to ${folder}.`,
+  undo: "Undo",
+  opFailed: (what: string, why: string) => `Could not ${what}. ${why}`,
+  markAllRead: "Mark all read",
+  emptyFolder: (folder: string) => `Empty ${folder}`,
+  emptyConfirm: (n: number, folder: string) =>
+    `Delete all ${n.toLocaleString("en")} messages in ${folder} permanently? This cannot be undone.`,
+  loadOlder: "Load older messages",
+
+  // Folder settings (section 9, Folder list)
+  foldersTitle: "Folders",
+  folderName: "Folder",
+  newFolder: "New folder",
+  newFolderHint: "Full name, for example Projects/2026",
+  create: "Create",
+  rename: "Rename",
+  deleteFolder: "Delete folder",
+  deleteFolderConfirm: (name: string) => `Delete the folder ${name} and every message in it, on the server too?`,
+  syncToggle: "Sync",
+  watchToggle: "Watch",
+  roleLabel: "Role",
+  noRole: "None",
+
   // Status bar
   statusLabel: "Sync status",
-  pending: (n: number) => (n === 1 ? "1 change pending" : `${n} changes pending`),
+  pending: (n: number) => (n === 1 ? "1 change pending" : `${n.toLocaleString("en")} changes pending`),
   backoffWarning: (account: string, error: string) => `${account}: ${error}`,
   openLog: "Open the log folder",
   linkTarget: "Link target",
@@ -119,6 +157,27 @@ export const strings = {
   oauthLater: "Google sign-in arrives in a later version; use an app password for now.",
   fieldInvalid: "Check this field",
 } as const;
+
+/** What a failed op was doing, for the op-failed toast (SPEC_GAPS G58). */
+export const opKindText: Record<OpKind, string> = {
+  flags: "update the message",
+  move: "move the message",
+  expunge: "delete the message",
+  folder_create: "create the folder",
+  folder_rename: "rename the folder",
+  folder_delete: "delete the folder",
+};
+
+/** Folder roles in words (folder settings). */
+export const roleText: Record<Role, string> = {
+  inbox: "Inbox",
+  drafts: "Drafts",
+  sent: "Sent",
+  archive: "Archive",
+  junk: "Junk",
+  trash: "Trash",
+  all: "All Mail",
+};
 
 /** The account states in words (status bar and tooltips). */
 export const stateText: Record<AccountState, string> = {

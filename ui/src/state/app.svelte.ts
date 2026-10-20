@@ -3,13 +3,15 @@
 // rows are not here: the list keeps only its visible window (section 14).
 
 import { commands, on, toAppError, type AccountView, type AppError, type FolderView } from "../lib/ipc";
-import { strings } from "../strings";
+import { errorText, opKindText, strings } from "../strings";
 
 export type FormMode = { mode: "add" } | { mode: "edit"; account: AccountView };
 
 export interface Notice {
   id: number;
   text: string;
+  /** The op the Undo button reverses (section 9: archive, delete and move). */
+  undo?: number;
 }
 
 /** A folder reset toast lasts as long as the spec's other toasts (section 9: 10 s). */
@@ -34,6 +36,8 @@ class AppState {
   startError = $state<AppError | null>(null);
   /** The real target of the link under the pointer in a message (section 11, status bar). */
   hoveredLink = $state<string | null>(null);
+  /** Unfinished ops and outbox items (pending-count). */
+  pending = $state(0);
 
   private unlisten: (() => void)[] = [];
   private nextToast = 1;
@@ -61,6 +65,12 @@ class AppState {
       }),
       on("storage-warning", (p) => {
         this.storage = p.kind;
+      }),
+      on("pending-count", (p) => {
+        this.pending = p.total;
+      }),
+      on("op-failed", (p) => {
+        this.toast(strings.opFailed(opKindText[p.kind], errorText[p.error.code]));
       }),
     ]);
     this.unlisten = offs;
@@ -147,10 +157,32 @@ class AppState {
     if (state === "idle" || state === "syncing") void this.reloadFolders(accountId);
   }
 
-  toast(text: string): void {
+  toast(text: string, undo?: number): void {
     const id = this.nextToast++;
-    this.toasts.push({ id, text });
+    this.toasts.push(undo === undefined ? { id, text } : { id, text, undo });
     setTimeout(() => this.dismissToast(id), TOAST_MS);
+  }
+
+  /** Undo from a toast: the op is cancelled or reversed (section 9). */
+  async undo(toastId: number, opId: number): Promise<void> {
+    this.dismissToast(toastId);
+    try {
+      await commands["message.undo"](opId);
+    } catch (err) {
+      this.toast(errorText[toAppError(err).code]);
+    }
+  }
+
+  /** Runs an action; a failure becomes a toast with the error in words. */
+  async act(action: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch (err) {
+      const e = toAppError(err);
+      if (e.code !== "cancelled") this.toast(errorText[e.code]);
+      return false;
+    }
   }
 
   dismissToast(id: number): void {

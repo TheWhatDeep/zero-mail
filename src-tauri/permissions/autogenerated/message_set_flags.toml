@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-set-flags"
+description = "Enables the message_set_flags command without any pre-configured scope."
+commands.allow = ["message_set_flags"]
+
+[[permission]]
+identifier = "deny-message-set-flags"
+description = "Denies the message_set_flags command without any pre-configured scope."
+commands.deny = ["message_set_flags"]
