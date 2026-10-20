@@ -7,6 +7,8 @@ import {
   emptyFields,
   fromCandidate,
   groupFingerprint,
+  isGoogleHost,
+  methodsFor,
   passed,
   toConfig,
   validate,
@@ -301,6 +303,19 @@ describe("account form", () => {
     // A password account sends no client fields.
     const pw = { ...filled, method: "password" as const, password: "pw" };
     expect(toConfig(pw, false)).toMatchObject({ oauth_client_id: null, oauth_client_secret: null, password: "pw" });
+  });
+
+  it("offers Google sign-in by the typed IMAP host when nothing was found", () => {
+    // A Workspace domain resolves to nothing; the user types Google's hosts by hand.
+    expect(methodsFor(null, "imap.gmail.com")).toEqual(["oauth_google", "password"]);
+    expect(methodsFor(null, " IMAP.GoogleMail.com. ")).toEqual(["oauth_google", "password"]);
+    expect(methodsFor(null, "imap.fastmail.com")).toEqual(["password"]);
+    expect(methodsFor(null, "")).toEqual(["password"]);
+    expect(isGoogleHost("notgmail.com")).toBe(false);
+    // A found candidate's capability-checked list wins while its host is kept.
+    const noXoauth: Candidate = { ...candidate, imap: { ...candidate.imap, host: "imap.gmail.com" }, auth_methods: ["password"] };
+    expect(methodsFor(noXoauth, "imap.gmail.com")).toEqual(["password"]);
+    expect(methodsFor(candidate, "imap.gmail.com")).toEqual(["oauth_google", "password"]);
   });
 
   it("offers a certificate fingerprint to pin and needs both halves to pass", () => {

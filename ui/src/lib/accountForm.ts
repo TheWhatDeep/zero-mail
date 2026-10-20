@@ -77,6 +77,22 @@ export function fromSummary(a: AccountSummary): FormFields {
   };
 }
 
+/** Google's IMAP hosts (section 5, step 3); mirrors `auth_methods` in mail-auth. */
+export function isGoogleHost(host: string): boolean {
+  const h = host.trim().replace(/\.$/, "").toLowerCase();
+  return ["gmail.com", "googlemail.com"].some((d) => h === d || h.endsWith(`.${d}`));
+}
+
+/** The login methods to offer: the found candidate's (checked against the server's
+ * capabilities) while its IMAP host is in use, otherwise by the typed IMAP host. A Workspace
+ * domain resolves to nothing and is typed in by hand (SPEC_GAPS G27). */
+export function methodsFor(candidate: Candidate | null, imapHost: string): AuthKind[] {
+  if (candidate && candidate.imap.host.toLowerCase() === imapHost.trim().toLowerCase()) {
+    return candidate.auth_methods;
+  }
+  return isGoogleHost(imapHost) ? ["oauth_google", "password"] : ["password"];
+}
+
 /** The usual port for a security mode (section 5, Transport security). */
 export function defaultPort(kind: "imap" | "smtp", security: Security): string {
   if (kind === "imap") return security === "tls" ? "993" : "143";

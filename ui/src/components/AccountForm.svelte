@@ -18,6 +18,7 @@
     fromCandidate,
     fromSummary,
     groupFingerprint,
+    methodsFor,
     passed,
     toConfig,
     validate,
@@ -62,7 +63,14 @@
     certificateToPin(report?.imap_error, report?.smtp_error, candidate?.probe_error, error),
   );
   const google = $derived(fields.method === "oauth_google");
-  const methods = $derived<AuthKind[]>(!editing && candidate !== null ? candidate.auth_methods : []);
+  const methods = $derived<AuthKind[]>(editing ? [] : methodsFor(candidate, fields.imapHost));
+
+  // A method the host no longer offers falls back to the first one it does.
+  $effect(() => {
+    if (!editing && methods.length > 0 && !methods.includes(fields.method)) {
+      fields.method = methods[0] ?? "password";
+    }
+  });
 
   $effect(() => {
     let off: (() => void) | null = null;
