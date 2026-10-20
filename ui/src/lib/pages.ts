@@ -16,6 +16,8 @@ export class PageCache {
   /** Start cursor of page p; page 0 starts at the top (null). */
   private starts = new Map<number, Cursor | null>([[0, null]]);
   private ended: number | null = null;
+  /** Rows on the last page, once it has been seen. */
+  private endCount: number | null = null;
   private loading = new Set<number>();
   private generation = 0;
 
@@ -40,6 +42,16 @@ export class PageCache {
   /** True once the last page has been seen. */
   get complete(): boolean {
     return this.ended !== null && this.pages.has(this.ended);
+  }
+
+  /** How many rows the list has, as far as is known: exact once the last page has been
+   * seen, else the rows reached so far plus one page, so the list can scroll on. For lists
+   * whose length the folder counts cannot give (threads, All Inboxes, search). */
+  estimatedTotal(): number {
+    if (this.ended !== null && this.endCount !== null) return this.ended * PAGE_SIZE + this.endCount;
+    const pages = [...this.pages.keys()];
+    const reached = pages.length === 0 ? 0 : Math.max(...pages) * PAGE_SIZE + (this.pages.get(Math.max(...pages))?.length ?? 0);
+    return reached + PAGE_SIZE;
   }
 
   /**
@@ -67,6 +79,7 @@ export class PageCache {
           this.starts.set(p + 1, page.next);
         } else {
           this.ended = p;
+          this.endCount = page.rows.length;
         }
         changed = true;
       } finally {
@@ -104,9 +117,13 @@ export class PageCache {
     }
     if (after) {
       this.starts.set(1, after);
-      this.ended = same ? this.ended : null;
+      if (!same) {
+        this.ended = null;
+        this.endCount = null;
+      }
     } else {
       this.ended = 0;
+      this.endCount = first.rows.length;
     }
     if (!same) return;
     for (const p of kept) {
@@ -117,7 +134,10 @@ export class PageCache {
       if (generation !== this.generation) return;
       this.pages.set(p, page.rows);
       if (page.next) this.starts.set(p + 1, page.next);
-      else this.ended = p;
+      else {
+        this.ended = p;
+        this.endCount = page.rows.length;
+      }
     }
   }
 }

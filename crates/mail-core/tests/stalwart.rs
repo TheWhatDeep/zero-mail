@@ -644,3 +644,156 @@ async fn t09_wrong_password_needs_attention_and_others_keep_working() {
     assert_eq!(err.account_id, Some(carol.id));
     assert!(accounts.check_login(alice.id).await.unwrap() >= 1);
 }
+
+/// M9 against the real servers: a message and its reply, both sent through the app, thread
+/// together in INBOX with the Sent copy; Stalwart has no X-GM-EXT-1, so there are no labels
+/// (T36's Stalwart half); Search server too runs a real `UID SEARCH`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the Stalwart container; runs in CI"]
+async fn m9_threads_no_labels_and_server_search_through_the_real_transport() {
+    use mail_core::compose::{DraftContent, Timing};
+    use mail_core::search::SearchRequest;
+    use mail_core::views::{AddressView, ListRequest, Scope};
+    use mail_core::{Core, CoreConfig, CoreEvent, EventSink, StateName};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new("stalwart-m9");
+    let accounts = service(&dir).await;
+    let pin_hex = fingerprint(&accounts).await;
+    drop(accounts);
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let sink: EventSink = Arc::new(move |e| log.lock().unwrap().push(e));
+    let core = Core::start(
+        CoreConfig {
+            data_dir: dir.path().join("core"),
+            secrets: secrets() as Arc<dyn SecretStore>,
+            imap: ImapClient,
+            smtp: SmtpClient,
+            http: NoHttp,
+        },
+        sink,
+    )
+    .await
+    .unwrap();
+    core.set_timing(Timing {
+        undo_window: Duration::ZERO,
+        draft_upload: Duration::from_secs(3600),
+        outbox_tick: Duration::from_millis(200),
+        ..Timing::default()
+    });
+    let mut c = config("alice", "alice-test-pw", false);
+    c.pinned_cert_sha256 = Some(pin_hex);
+    let account = core.account_add(c).await.unwrap().id;
+    let start = Instant::now();
+    let deadline = Duration::from_secs(120);
+    while !events.lock().unwrap().iter().any(|e| {
+        matches!(e, CoreEvent::AccountState { state: StateName::Idle, account_id, .. } if *account_id == account)
+    }) {
+        assert!(start.elapsed() < deadline, "never idle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("m9thread{nanos}");
+    let inbox = core
+        .folder_list(account)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|f| f.path == "INBOX")
+        .unwrap()
+        .id;
+    let rows = |group: bool| {
+        let core = Arc::clone(&core);
+        async move {
+            core.list_page(ListRequest {
+                scope: Scope::Folder { folder_id: inbox },
+                cursor: None,
+                limit: 500,
+                group_by_thread: group,
+            })
+            .await
+            .unwrap()
+            .rows
+        }
+    };
+    let send = |draft: mail_core::compose::DraftView| {
+        let core = Arc::clone(&core);
+        let subject = subject.clone();
+        async move {
+            let identity = draft.identities[0].id.unwrap();
+            let content = DraftContent {
+                to: vec![AddressView {
+                    name: String::new(),
+                    addr: "alice@test.local".into(),
+                }],
+                subject: if draft.content.subject.is_empty() {
+                    subject
+                } else {
+                    draft.content.subject.clone()
+                },
+                html: "<p>Hi</p>".into(),
+                text: "Hi".into(),
+                ..draft.content
+            };
+            core.draft_save(draft.draft_id, content).await.unwrap();
+            core.draft_send(draft.draft_id, identity, None)
+                .await
+                .unwrap();
+        }
+    };
+    send(core.compose_new(account, None).await.unwrap()).await;
+    let original = loop {
+        if let Some(r) = rows(false).await.into_iter().find(|r| r.subject == subject) {
+            break r;
+        }
+        assert!(
+            start.elapsed() < deadline,
+            "the first message never arrived"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    send(core.compose_reply(original.id, false).await.unwrap()).await;
+    loop {
+        let n = rows(false)
+            .await
+            .iter()
+            .filter(|r| r.subject.ends_with(&subject))
+            .count();
+        if n == 2 {
+            break;
+        }
+        assert!(start.elapsed() < deadline, "the reply never arrived");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    // One thread row for both, counting the Sent copies too (section 10, rules 5 and 6).
+    let grouped: Vec<_> = rows(true)
+        .await
+        .into_iter()
+        .filter(|r| r.subject.ends_with(&subject))
+        .collect();
+    assert_eq!(grouped.len(), 1, "one conversation");
+    assert!(grouped[0].thread.as_ref().unwrap().messages >= 2);
+
+    // No X-GM-EXT-1: no labels.
+    let view = core.message_open(original.id).await.unwrap();
+    assert_eq!(view.labels, None);
+
+    // Search server too: a real UID SEARCH, then the local results.
+    let found = core
+        .search_query(SearchRequest {
+            text: format!("subject:{subject}"),
+            account_id: Some(account),
+            server_too: true,
+            cursor: None,
+            limit: 50,
+        })
+        .await
+        .unwrap();
+    assert!(found.rows.iter().filter(|r| r.folder_id == inbox).count() == 2);
+    core.shutdown().await;
+}

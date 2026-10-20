@@ -3,12 +3,15 @@
   // window plus overscan is in the DOM, at most 100 rows (section 14). Rows load in keyset
   // pages of 100 and pages far from the window are dropped. One card with sticky "Today"
   // and "Earlier" headers. An ARIA listbox: arrow keys, Home and End move the selection.
+  // The source is a folder, All Inboxes or a search, with or without Group by conversation
+  // (section 10, rule 5); a list the folder counts cannot size grows as its pages load.
   import { onMount, untrack } from "svelte";
   import MessageRow from "./MessageRow.svelte";
   import { canEmpty } from "../lib/actions";
   import { isToday } from "../lib/format";
-  import { commands, type FolderView, type Row } from "../lib/ipc";
+  import { commands, type Row } from "../lib/ipc";
   import { PageCache } from "../lib/pages";
+  import type { ListSource } from "../lib/source";
   import { answerScrollRequests, answerWalkRequests, markInboxReady } from "../lib/perf";
   import {
     earlierHeaderTop,
@@ -23,7 +26,8 @@
   import { app } from "../state/app.svelte";
   import { strings } from "../strings";
 
-  let { folder }: { folder: FolderView } = $props();
+  let { source }: { source: ListSource } = $props();
+  const folder = $derived(source.folder);
 
   const OVERSCAN = 8;
 
@@ -38,25 +42,58 @@
   let selectedIndex = $state<number | null>(null);
   let now = $state(new Date());
   let cache: PageCache | null = null;
-  let cacheFolder = -1;
+  let cacheKey = "";
+  /** The cache a new source is waiting to get (the search debounce). */
+  let pending: ReturnType<typeof setTimeout> | undefined;
   /** Empty Trash waiting for confirmation (section 9). */
   let confirmEmpty = $state(false);
+  /** Search: messages in scope whose body is not indexed (section 10). */
+  let unindexed = $state<number | null>(null);
+  let searchingServer = $state(false);
 
-  const layout: Layout = $derived({ rowHeight, headerHeight, total: folder.total, todayCount });
+  /** Rows in the list: the folder count, or what the loaded pages show. */
+  const total = $derived.by(() => {
+    void version;
+    return source.total ?? cache?.estimatedTotal() ?? 0;
+  });
+  const empty = $derived.by(() => {
+    void version;
+    return source.total === 0 || (source.total === null && cache !== null && cache.complete && cache.estimatedTotal() === 0);
+  });
+  const layout: Layout = $derived({ rowHeight, headerHeight, total, todayCount });
   const range = $derived(visibleRange(scrollTop, viewport, layout, OVERSCAN));
   const indices = $derived(range.last >= range.first ? Array.from({ length: range.last - range.first + 1 }, (_, k) => range.first + k) : []);
   const earlierTop = $derived(earlierHeaderTop(layout));
   const stickyEarlier = $derived(earlierTop !== null && scrollTop >= earlierTop);
-  const skeleton = $derived(folder.total === 0 && !folder.synced);
+  const skeleton = $derived(folder !== null && !source.group && folder.total === 0 && !folder.synced);
 
   function cssPx(name: string, fallback: number): number {
     const v = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
     return Number.isFinite(v) && v > 0 ? v : fallback;
   }
 
-  function fetchPage(folderId: number) {
-    return (cursor: Parameters<typeof commands["list.page"]>[0]["cursor"], limit: number) =>
-      commands["list.page"]({ scope: { kind: "folder", folder_id: folderId }, cursor, limit, group_by_thread: false });
+  function fetchPage(s: ListSource) {
+    return async (cursor: Parameters<typeof commands["list.page"]>[0]["cursor"], limit: number) => {
+      const page = await commands["list.page"]({ scope: s.scope, cursor, limit, group_by_thread: s.group });
+      if (cursor === null && page.unindexed !== null) unindexed = page.unindexed;
+      return page;
+    };
+  }
+
+  /** Search server too (section 10): hits not cached are fetched, then the list reloads. */
+  async function searchServer(): Promise<void> {
+    const text = source.searchText;
+    if (text === null || !cache) return;
+    searchingServer = true;
+    const c = cache;
+    await app.act(() =>
+      commands["search.query"]({ text, account_id: source.searchAccount, server_too: true, cursor: null, limit: 100 }),
+    );
+    searchingServer = false;
+    if (c !== cache) return;
+    await c.refresh();
+    version += 1;
+    await load();
   }
 
   /** The Today/Earlier boundary, once the rows around it are loaded. */
@@ -80,22 +117,31 @@
     if (c.row(0)) markInboxReady();
   }
 
-  // A new folder: a fresh cache from the top.
+  // A new source: a fresh cache from the top. A search waits 150 ms after the last
+  // keystroke; a newer one makes the older one's answer stale (section 10).
   $effect(() => {
-    const id = folder.id;
-    if (id === cacheFolder) return;
-    cacheFolder = id;
-    cache = new PageCache(fetchPage(id));
+    const s = source;
+    if (s.key === cacheKey) return;
+    cacheKey = s.key;
+    cache = null;
+    unindexed = null;
     todayCount = null;
     selectedIndex = null;
     confirmEmpty = false;
+    version += 1;
     now = new Date();
-    untrack(() => {
-      if (scroller) scroller.scrollTop = 0;
-      scrollTop = 0;
-      version += 1;
-      void load();
-    });
+    const delay = s.searchText !== null ? 150 : 0;
+    clearTimeout(pending);
+    pending = setTimeout(() => {
+      if (cacheKey !== s.key) return;
+      cache = new PageCache(fetchPage(s));
+      untrack(() => {
+        if (scroller) scroller.scrollTop = 0;
+        scrollTop = 0;
+        version += 1;
+        void load();
+      });
+    }, delay);
   });
 
   // Rows needed by the window.
@@ -105,9 +151,11 @@
     void load();
   });
 
-  // A store change in this folder: reload kept pages (section 3, One data path).
+  // A store change in this folder (any folder, for All Inboxes and search): reload kept
+  // pages (section 3, One data path).
   $effect(() => {
-    const n = app.changeCount(folder.account_id, folder.id);
+    const f = folder;
+    const n = f && !source.group ? app.changeCount(f.account_id, f.id) : app.changeTotal;
     if (n === 0 || !cache) return;
     const c = cache;
     now = new Date();
@@ -139,12 +187,12 @@
 
   function select(row: Row, index: number): void {
     selectedIndex = index;
-    app.message = row.id;
+    app.selectRow(row);
   }
 
   async function move(to: number): Promise<void> {
-    if (!cache || folder.total === 0 || !scroller) return;
-    const i = Math.max(0, Math.min(folder.total - 1, to));
+    if (!cache || total === 0 || !scroller) return;
+    const i = Math.max(0, Math.min(total - 1, to));
     await cache.ensure(i, i);
     version += 1;
     const r = cache.row(i);
@@ -164,7 +212,7 @@
       void move(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      void move(folder.total - 1);
+      void move(total - 1);
     }
   }
 
@@ -177,20 +225,37 @@
         await move(i);
         return cache?.row(i)?.subject ?? null;
       },
-      () => folder.total,
+      () => total,
     );
     if (!scroller) return;
     const el = scroller;
     const resize = new ResizeObserver(() => (viewport = el.clientHeight));
     resize.observe(el);
     viewport = el.clientHeight;
-    return () => resize.disconnect();
+    return () => {
+      resize.disconnect();
+      clearTimeout(pending);
+    };
   });
 </script>
 
 <section class="card" aria-label={strings.listLabel}>
-  {#if folder.unread > 0 || canEmpty(folder)}
-    <div class="bar">
+  <div class="bar">
+    {#if source.searchText !== null}
+      <span class="meta">
+        {unindexed !== null && unindexed > 0 ? strings.notIndexed(unindexed) : ""}
+      </span>
+      <button class="small tint press" disabled={searchingServer} onclick={searchServer}>
+        {searchingServer ? strings.searchingServer : strings.searchServerToo}
+      </button>
+    {:else}
+      <label class="toggle">
+        <input type="checkbox" bind:checked={app.grouped} />
+        <span>{strings.groupByConversation}</span>
+      </label>
+    {/if}
+    <span class="grow"></span>
+    {#if folder}
       {#if confirmEmpty}
         <span class="confirm" role="alertdialog" aria-label={strings.emptyFolder(folder.name)}>
           <span class="text">{strings.emptyConfirm(folder.total, folder.name)}</span>
@@ -213,15 +278,15 @@
           <button class="small tint press" onclick={() => (confirmEmpty = true)}>{strings.emptyFolder(folder.name)}</button>
         {/if}
       {/if}
-    </div>
-  {/if}
+    {/if}
+  </div>
   <div
     class="scroller"
     bind:this={scroller}
     onscroll={() => (scrollTop = scroller?.scrollTop ?? 0)}
     role="listbox"
     tabindex="0"
-    aria-label={folder.name}
+    aria-label={folder?.name ?? strings.listLabel}
     aria-activedescendant={app.message !== null && selectedIndex !== null ? `row-${app.message}` : undefined}
     {onkeydown}
   >
@@ -231,25 +296,25 @@
           <div class="skeleton-row" aria-hidden="true"><span></span><span></span><span></span></div>
         {/each}
       </div>
-    {:else if folder.total === 0}
-      <p class="empty">{strings.noMessages}</p>
+    {:else if empty}
+      <p class="empty">{source.searchText !== null ? strings.noResults : strings.noMessages}</p>
     {:else}
       <div class="spacer" style:height={`${totalHeight(layout)}px`}>
         {#if hasTodayHeader(layout) || hasEarlierHeader(layout)}
           <div class="header sticky" aria-hidden="true">
             {#if stickyEarlier || !hasTodayHeader(layout)}
               <span class="title">{strings.earlier}</span>
-              {#if todayCount !== null}<span class="count">{strings.messages(folder.total - todayCount)}</span>{/if}
+              {#if todayCount !== null && source.total !== null}<span class="count">{strings.messages(total - todayCount)}</span>{/if}
             {:else}
               <span class="title">{strings.today}</span>
-              {#if todayCount !== null}<span class="count">{strings.messages(todayCount)}</span>{/if}
+              {#if todayCount !== null && source.total !== null}<span class="count">{strings.messages(todayCount)}</span>{/if}
             {/if}
           </div>
         {/if}
         {#if earlierTop !== null && hasTodayHeader(layout)}
           <div class="header inline" style:transform={`translateY(${earlierTop}px)`} aria-hidden="true">
             <span class="title">{strings.earlier}</span>
-            {#if todayCount !== null}<span class="count">{strings.messages(folder.total - todayCount)}</span>{/if}
+            {#if todayCount !== null && source.total !== null}<span class="count">{strings.messages(total - todayCount)}</span>{/if}
           </div>
         {/if}
         {#each indices as i (i)}
@@ -257,7 +322,7 @@
           {#if r}
             <MessageRow
               row={r}
-              role={folder.role}
+              role={folder?.role ?? null}
               selected={app.message === r.id}
               top={rowTop(i, layout)}
               {now}
@@ -271,7 +336,7 @@
         {/each}
       </div>
     {/if}
-    {#if folder.synced}
+    {#if folder && folder.synced && source.searchText === null}
       <div class="more">
         <button class="small tint press" onclick={() => app.act(() => commands["folder.extend_window"](folder.account_id, folder.id))}>
           {strings.loadOlder}
@@ -300,6 +365,23 @@
     gap: var(--space-6);
     padding: var(--space-6) var(--space-8);
     border-bottom: 1px solid var(--color-divider);
+  }
+
+  .grow {
+    flex: 1;
+  }
+
+  .meta {
+    font-size: var(--text-meta);
+    color: var(--color-text-muted);
+  }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    font-size: var(--text-meta);
+    color: var(--color-text-muted-strong);
   }
 
   .confirm {

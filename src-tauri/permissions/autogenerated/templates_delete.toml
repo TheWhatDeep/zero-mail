@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-templates-delete"
+description = "Enables the templates_delete command without any pre-configured scope."
+commands.allow = ["templates_delete"]
+
+[[permission]]
+identifier = "deny-templates-delete"
+description = "Denies the templates_delete command without any pre-configured scope."
+commands.deny = ["templates_delete"]

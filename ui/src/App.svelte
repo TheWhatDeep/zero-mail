@@ -7,7 +7,10 @@
   import MessageList from "./components/MessageList.svelte";
   import Outbox from "./components/Outbox.svelte";
   import ReadingPane from "./components/ReadingPane.svelte";
+  import SearchBox from "./components/SearchBox.svelte";
   import Sidebar from "./components/Sidebar.svelte";
+  import ThreadView from "./components/ThreadView.svelte";
+  import { listSource } from "./lib/source";
   import StatusBar from "./components/StatusBar.svelte";
   import { app } from "./state/app.svelte";
   import { errorText, strings } from "./strings";
@@ -18,6 +21,8 @@
   });
 
   const folder = $derived(app.selectedFolder);
+  const source = $derived(listSource({ folder: folder ?? null, unified: app.unified, search: app.search, grouped: app.grouped }));
+  const title = $derived(app.search ? strings.searchResults : app.unified ? strings.allInboxes : (folder?.name ?? ""));
 </script>
 
 {#if !app.loaded}
@@ -37,14 +42,21 @@
         <h1 class="title">{strings.outbox}</h1>
         <Outbox accountId={app.outboxAccount} />
       {:else}
-        <h1 class="title">{folder?.name ?? ""}</h1>
+        <div class="head">
+          <h1 class="title">{title}</h1>
+          <SearchBox />
+        </div>
         <div class="panes">
-          {#if folder}
-            <MessageList {folder} />
+          {#if source}
+            <MessageList {source} />
           {:else}
             <div></div>
           {/if}
-          <ReadingPane />
+          {#if app.thread}
+            <ThreadView thread={app.thread} />
+          {:else}
+            <ReadingPane />
+          {/if}
         </div>
       {/if}
     </main>
@@ -82,6 +94,13 @@
     grid-template-rows: auto auto minmax(0, 1fr);
     gap: var(--space-14);
     padding: var(--space-18) var(--space-20) var(--space-20);
+  }
+
+  .head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--reading-width);
+    align-items: center;
+    gap: var(--space-18);
   }
 
   .title {

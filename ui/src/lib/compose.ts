@@ -134,3 +134,11 @@ export function chipsFrom(text: string, existing: Address[]): Address[] {
   );
   return [...existing, ...added];
 }
+
+/** Puts `snippet` into `text` at the cursor (`start`..`end` replaced), for Insert template in
+ * plain-text mode (section 18.4). Returns the new text and where the cursor goes. */
+export function insertAt(text: string, start: number, end: number, snippet: string): { text: string; cursor: number } {
+  const a = Math.max(0, Math.min(start, text.length));
+  const b = Math.max(a, Math.min(end, text.length));
+  return { text: text.slice(0, a) + snippet + text.slice(b), cursor: a + snippet.length };
+}

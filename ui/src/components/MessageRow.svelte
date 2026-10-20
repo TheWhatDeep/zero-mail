@@ -4,6 +4,7 @@
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
   import { rowDate, senderLabel, subjectText } from "../lib/format";
+  import { participantsText } from "../lib/threads";
   import type { Role, Row } from "../lib/ipc";
   import { strings } from "../strings";
 
@@ -18,6 +19,10 @@
     $props();
 
   const sent = $derived(role === "sent" || role === "drafts");
+  /** A thread row (section 10, rule 5): participants and the message count. */
+  const thread = $derived(row.thread && row.thread.messages > 1 ? row.thread : null);
+  /** A thread is unread while any of its messages is. */
+  const unread = $derived(thread ? thread.unread > 0 : row.unread);
 </script>
 
 <!-- Keys are handled by the listbox (MessageList), as in any ARIA listbox. -->
@@ -25,7 +30,7 @@
 <div
   id={`row-${row.id}`}
   class="row tint"
-  class:unread={row.unread}
+  class:unread
   role="option"
   aria-selected={selected}
   tabindex="-1"
@@ -33,9 +38,12 @@
   onclick={() => onselect(row)}
 >
   <span class="dot" aria-hidden="true"></span>
-  {#if row.unread}<span class="visually-hidden">{strings.unread}</span>{/if}
+  {#if unread}<span class="visually-hidden">{strings.unread}</span>{/if}
   <Avatar person={sent ? (row.to[0] ?? row.from) : row.from} />
-  <span class="sender">{senderLabel(row, role)}</span>
+  <span class="sender">
+    {thread ? participantsText(thread.participants) : senderLabel(row, role)}
+    {#if thread}<span class="count" aria-label={strings.threadCount(thread.messages)}>{thread.messages}</span>{/if}
+  </span>
   <span class="text">
     <span class="subject">{subjectText(row.subject)}</span>
     {#if row.preview}<span class="preview"> — {row.preview}</span>{/if}
@@ -48,6 +56,12 @@
 </div>
 
 <style>
+  .count {
+    margin-left: var(--space-6);
+    font-size: var(--text-meta);
+    color: var(--color-text-muted);
+  }
+
   .row {
     --tint: var(--color-row-hover);
     position: absolute;

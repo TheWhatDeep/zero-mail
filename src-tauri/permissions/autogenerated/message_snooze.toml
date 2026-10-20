@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-snooze"
+description = "Enables the message_snooze command without any pre-configured scope."
+commands.allow = ["message_snooze"]
+
+[[permission]]
+identifier = "deny-message-snooze"
+description = "Denies the message_snooze command without any pre-configured scope."
+commands.deny = ["message_snooze"]

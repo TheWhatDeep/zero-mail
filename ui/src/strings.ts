@@ -226,7 +226,63 @@ export const strings = {
   isDefault: "Default",
   addIdentity: "Add identity",
   removeIdentity: (addr: string) => `Remove ${addr}`,
+
+  // Search, All Inboxes and conversations (section 10; section 11)
+  allInboxes: "All Inboxes",
+  searchLabel: "Search mail",
+  searchPlaceholder: "Search",
+  searchAllAccounts: "All accounts",
+  searchResults: "Search results",
+  noResults: "No messages match",
+  notIndexed: (n: number) =>
+    n === 1 ? "1 message is not downloaded yet, so its text is not searched" : `${n.toLocaleString("en")} messages are not downloaded yet, so their text is not searched`,
+  searchServerToo: "Search server too",
+  searchingServer: "Searching the server",
+  groupByConversation: "Group by conversation",
+  threadCount: (n: number) => `${n.toLocaleString("en")} messages`,
+  threadLabel: "Conversation",
+  expandMessage: "Show this message",
+
+  // Labels, snooze, mute and Block sender (section 18)
+  labelsLabel: "Labels",
+  important: "Important",
+  addLabel: "Add label",
+  removeLabel: (name: string) => `Remove the label ${name}`,
+  labelAddedToast: "Label added.",
+  labelRemovedToast: "Label removed.",
+  snooze: "Snooze",
+  pickDateTime: "Pick a date and time",
+  unsnooze: "Unsnooze",
+  snoozedToast: (when: string) => `Snoozed until ${when}.`,
+  snoozedUntil: (when: string) => `Snoozed until ${when}`,
+  mute: "Mute",
+  unmute: "Unmute",
+  muted: "Muted",
+  blockSender: "Block sender",
+  blockedToast: (addr: string) => `Mail from ${addr} now goes to Trash.`,
+
+  // Send later and templates (sections 18.3 and 18.4)
+  sendLater: "Send later",
+  sendLaterNote: "Zero Mail must be running at that time, in the tray at least.",
+  scheduledToast: (when: string) => `Scheduled for ${when}.`,
+  insertTemplate: "Insert template",
+  saveAsTemplate: "Save as template",
+  templateName: "Template name",
+  templateSaved: "Template saved.",
+  noTemplates: "No templates yet",
+  sendNow: "Send now",
+  cancelScheduled: "Cancel",
+  sentHistory: "Sent",
+  sentLate: "Sent late",
 } as const;
+
+/** Snooze and Send later presets (section 18.2). */
+export const presetText: Record<"later_today" | "tomorrow" | "weekend" | "next_week", string> = {
+  later_today: "Later today",
+  tomorrow: "Tomorrow",
+  weekend: "This weekend",
+  next_week: "Next week",
+};
 
 /** Outbox states in words (Outbox view). */
 export const outboxStateText: Record<OutboxStateName, string> = {
@@ -249,6 +305,8 @@ export const opKindText: Record<OpKind, string> = {
   append: "save a copy to Sent",
   draft_replace: "save the draft to the server",
   draft_delete: "remove the draft from the server",
+  label_add: "add the label",
+  label_remove: "remove the label",
 };
 
 /** Folder roles in words (folder settings). */

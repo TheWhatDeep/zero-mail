@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-draft-apply-template"
+description = "Enables the draft_apply_template command without any pre-configured scope."
+commands.allow = ["draft_apply_template"]
+
+[[permission]]
+identifier = "deny-draft-apply-template"
+description = "Denies the draft_apply_template command without any pre-configured scope."
+commands.deny = ["draft_apply_template"]

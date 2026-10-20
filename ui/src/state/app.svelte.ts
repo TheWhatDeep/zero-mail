@@ -16,6 +16,18 @@ import { errorText, opKindText, strings } from "../strings";
 
 export type FormMode = { mode: "add" } | { mode: "edit"; account: AccountView };
 
+/** A search in progress (section 10): the text, and the scope toggle. */
+export interface SearchView {
+  text: string;
+  allAccounts: boolean;
+}
+
+/** The thread the reading pane shows, with the folder it was opened from (rule 6). */
+export interface ThreadView {
+  thread_id: number;
+  folder_id: number | null;
+}
+
 export interface Notice {
   id: number;
   text: string;
@@ -33,6 +45,14 @@ export function needsAction(items: OutboxView[]): number {
 /** The Outbox view lists what has not gone yet; sent rows are history. */
 export function unsent(items: OutboxView[]): OutboxView[] {
   return items.filter((o) => o.state !== "sent");
+}
+
+/** Sent rows, newest first, at most 50 (section 18.3: Sent late shows in the history). */
+export function sentHistory(items: OutboxView[]): OutboxView[] {
+  return items
+    .filter((o) => o.state === "sent")
+    .sort((a, b) => b.send_after_utc - a.send_after_utc)
+    .slice(0, 50);
 }
 
 /** A folder reset toast lasts as long as the spec's other toasts (section 9: 10 s). */
@@ -54,6 +74,16 @@ class AppState {
   backoffSince = $state<Record<number, number>>({});
   /** Bumped on store-changed per folder; the list and reader re-query. */
   changes = $state<Record<string, number>>({});
+  /** Bumped on every store-changed: lists across folders (All Inboxes, search) re-query. */
+  changeTotal = $state(0);
+  /** All Inboxes is open (section 11). */
+  unified = $state(false);
+  /** A search replaces the list while its text is not empty (section 10). */
+  search = $state<SearchView | null>(null);
+  /** Group by conversation, default on (section 10, rule 5). */
+  grouped = $state(true);
+  /** With a thread row selected, the reading pane shows the thread (rule 6). */
+  thread = $state<ThreadView | null>(null);
   startError = $state<AppError | null>(null);
   /** The real target of the link under the pointer in a message (section 11, status bar). */
   hoveredLink = $state<string | null>(null);
@@ -165,19 +195,57 @@ class AppState {
 
   openOutbox(accountId: number): void {
     this.outboxAccount = accountId;
+    this.unified = false;
+    this.search = null;
     this.message = null;
+    this.thread = null;
   }
 
   selectFolder(accountId: number, folderId: number): void {
     this.outboxAccount = null;
-    if (this.selected?.account_id === accountId && this.selected.folder_id === folderId) return;
+    const same = this.selected?.account_id === accountId && this.selected.folder_id === folderId;
+    if (same && !this.unified && !this.search) return;
+    this.unified = false;
+    this.search = null;
     this.selected = { account_id: accountId, folder_id: folderId };
     this.message = null;
+    this.thread = null;
+  }
+
+  /** All Inboxes (section 11): every account's INBOX in one list. */
+  openUnified(): void {
+    this.outboxAccount = null;
+    this.search = null;
+    this.unified = true;
+    this.message = null;
+    this.thread = null;
+  }
+
+  /** Typing in the search box; empty text goes back to the list it replaced. */
+  setSearch(text: string, allAccounts: boolean): void {
+    if (text.trim() === "") {
+      this.search = null;
+    } else {
+      this.outboxAccount = null;
+      this.search = { text, allAccounts };
+    }
+    this.message = null;
+    this.thread = null;
+  }
+
+  /** Selects a list row; a thread row with several messages opens the thread view. */
+  selectRow(row: { id: number; thread_id: number; folder_id: number; thread: { messages: number } | null }): void {
+    this.message = row.id;
+    this.thread =
+      row.thread && row.thread.messages > 1
+        ? { thread_id: row.thread_id, folder_id: this.unified || this.search ? row.folder_id : (this.selected?.folder_id ?? null) }
+        : null;
   }
 
   private onStoreChanged(accountId: number, folderId: number | null): void {
     const key = `${accountId}:${folderId ?? "*"}`;
     this.changes[key] = (this.changes[key] ?? 0) + 1;
+    this.changeTotal += 1;
     // Counts and the folder list follow every change.
     void this.reloadFolders(accountId);
   }

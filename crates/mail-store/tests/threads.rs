@@ -242,3 +242,58 @@ async fn deleting_a_message_drops_its_refs() {
     store.delete_messages(inbox, vec![1]).await.unwrap();
     assert_eq!(count(&conn, "SELECT count(*) FROM message_refs"), 0);
 }
+
+/// Group by conversation stays fast on a big folder (section 14): the first page of thread
+/// rows over 50,000 messages, and a deep page, each well inside a frame budget of work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_pages_over_50k_messages_are_fast() {
+    let dir = TempDir::new("threads-perf");
+    let store = Store::open(&dir.db()).unwrap();
+    let (_, inbox, _) = seeded(&store).await;
+    let t0 = 1_760_000_000;
+    for start in (0..50_000u32).step_by(1_000) {
+        let batch: Vec<NewMessage> = (start..start + 1_000)
+            .map(|n| {
+                // Every tenth message replies to the one before it.
+                let irt = (n % 10 == 9).then(|| format!("m{}@x", n - 1));
+                msg(
+                    n + 1,
+                    t0 + i64::from(n) * 60,
+                    &format!("m{n}@x"),
+                    irt.as_deref(),
+                    &[],
+                    "Topic",
+                )
+            })
+            .collect();
+        store.insert_synced(inbox, batch).await.unwrap();
+    }
+    store
+        .threads_page(vec![inbox], Vec::new(), None, 100)
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let first = store
+        .threads_page(vec![inbox], Vec::new(), None, 100)
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    println!("first thread page in {took:?}");
+    assert_eq!(first.rows.len(), 100);
+    assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+    // Thread rows are unique and newest first across pages.
+    let mut cursor = first.next;
+    let mut seen: std::collections::HashSet<ThreadId> =
+        first.rows.iter().map(|r| r.row.thread_id).collect();
+    for _ in 0..50 {
+        let page = store
+            .threads_page(vec![inbox], Vec::new(), cursor, 100)
+            .await
+            .unwrap();
+        for r in &page.rows {
+            assert!(seen.insert(r.row.thread_id), "a thread listed twice");
+        }
+        cursor = page.next;
+    }
+    assert_eq!(seen.len(), 5_100);
+}

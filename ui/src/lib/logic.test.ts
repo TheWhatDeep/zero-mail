@@ -45,6 +45,7 @@ function row(id: number, date: number, extra: Partial<Row> = {}): Row {
     flagged: false,
     has_attach: false,
     preview: "",
+    thread: null,
     ...extra,
   };
 }
@@ -142,7 +143,7 @@ describe("keyset page cache", () => {
       const page = rows.slice(from, from + limit);
       const more = from + limit < rows.length;
       const last = page[page.length - 1];
-      return { rows: page, next: more && last ? { date_utc: last.date_utc, id: last.id } : null };
+      return { rows: page, next: more && last ? { date_utc: last.date_utc, id: last.id } : null, unindexed: null };
     };
     return {
       fetch,
@@ -208,6 +209,11 @@ describe("reader", () => {
     has_html: false,
     can_archive: true,
     delete_is_permanent: false,
+    labels: null,
+    important: false,
+    thread_id: id,
+    muted: false,
+    snoozed_until: null,
     body_url: `mail-body://localhost/${id}?images=0`,
     attachments: [],
     remote_images: "none",

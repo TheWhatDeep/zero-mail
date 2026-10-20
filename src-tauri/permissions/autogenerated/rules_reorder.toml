@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rules-reorder"
+description = "Enables the rules_reorder command without any pre-configured scope."
+commands.allow = ["rules_reorder"]
+
+[[permission]]
+identifier = "deny-rules-reorder"
+description = "Denies the rules_reorder command without any pre-configured scope."
+commands.deny = ["rules_reorder"]

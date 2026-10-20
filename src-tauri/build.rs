@@ -52,6 +52,22 @@ const COMMANDS: &[&str] = &[
     "identity_save",
     "identity_delete",
     "contacts_suggest",
+    "search_query",
+    "message_snooze",
+    "message_unsnooze",
+    "message_mute",
+    "message_unmute",
+    "message_add_label",
+    "message_remove_label",
+    "rules_list",
+    "rules_save",
+    "rules_delete",
+    "rules_reorder",
+    "rules_run_now",
+    "templates_list",
+    "templates_save",
+    "templates_delete",
+    "draft_apply_template",
 ];
 
 fn main() {

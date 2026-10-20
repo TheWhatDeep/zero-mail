@@ -125,8 +125,10 @@ export interface Cursor {
 export type Scope =
   | { kind: "folder"; folder_id: number }
   | { kind: "unified" }
-  | { kind: "search"; query: string }
-  | { kind: "thread"; thread_id: number };
+  /** `account_id` null: every account (section 10, Scope). */
+  | { kind: "search"; query: string; account_id: number | null }
+  /** The open folder decides whether Trash, Junk and Drafts are in (section 10, rule 6). */
+  | { kind: "thread"; thread_id: number; folder_id: number | null };
 
 export interface ListRequest {
   scope: Scope;
@@ -153,11 +155,27 @@ export interface Row {
   flagged: boolean;
   has_attach: boolean;
   preview: string;
+  /** With Group by conversation: the thread the row stands for (section 10, rule 5). */
+  thread: ThreadInfo | null;
+}
+
+export interface ThreadInfo {
+  messages: number;
+  unread: number;
+  participants: string[];
 }
 
 export interface Page {
   rows: Row[];
   next: Cursor | null;
+  /** Search, first page: messages in scope whose body is not indexed (section 10). */
+  unindexed: number | null;
+}
+
+/** A label chip (Gmail, section 18.1): the folder the label is. */
+export interface LabelView {
+  folder_id: number;
+  name: string;
 }
 
 /** HTML or plain text from mail-body; loading while it is fetched; unreadable when the
@@ -199,6 +217,15 @@ export interface MessageView {
   can_archive: boolean;
   /** Delete here is permanent and asks first (section 9). */
   delete_is_permanent: boolean;
+  /** Gmail only: one chip per label; null elsewhere, and the label UI is hidden. */
+  labels: LabelView[] | null;
+  /** Gmail's Important, a read-only badge. */
+  important: boolean;
+  thread_id: number;
+  /** The thread is muted (section 18.5). */
+  muted: boolean;
+  /** A snoozed message comes back at this UTC time (section 18.2). */
+  snoozed_until: number | null;
 }
 
 /** message.set_flags: a field left out is unchanged. */
@@ -276,6 +303,53 @@ export interface OutboxView {
   send_after_utc: number;
   created_at: number;
   draft_id: number | null;
+  /** Sent late: missed while the app was closed (section 18.3). */
+  late: boolean;
+}
+
+/** search.query (section 3). */
+export interface SearchRequest {
+  text: string;
+  account_id: number | null;
+  server_too: boolean;
+  cursor: Cursor | null;
+  limit: number;
+}
+
+/** Rules (section 18.6). */
+export type RuleField = "from" | "to" | "cc" | "subject" | "list_id" | "has_attachment" | "body";
+
+export interface RuleCondition {
+  field: RuleField;
+  value: string;
+}
+
+export type RuleAction =
+  | { kind: "move"; folder: string }
+  | { kind: "label"; folder: string }
+  | { kind: "star" }
+  | { kind: "mark_read" }
+  | { kind: "mute" }
+  | { kind: "delete" }
+  | { kind: "never_notify" };
+
+export interface RuleView {
+  id: number;
+  account_id: number | null;
+  name: string;
+  enabled: boolean;
+  conditions: { match: "all" | "any"; items: RuleCondition[] };
+  actions: RuleAction[];
+  stop_processing: boolean;
+}
+
+/** Templates (section 18.4). */
+export interface TemplateView {
+  id: number;
+  name: string;
+  subject: string;
+  body_html: string;
+  body_text: string;
 }
 
 /** pending_ops kinds, as op-failed reports them. */
@@ -288,7 +362,9 @@ export type OpKind =
   | "folder_delete"
   | "append"
   | "draft_replace"
-  | "draft_delete";
+  | "draft_delete"
+  | "label_add"
+  | "label_remove";
 
 const ERROR_CODES: readonly ErrorCode[] = [
   "network",
@@ -403,6 +479,27 @@ export const commands = {
   "identity.delete": (identity_id: number) => call<IdentityView[]>("identity_delete", { identity_id }),
   "contacts.suggest": (prefix: string, account_id: number) =>
     call<Address[]>("contacts_suggest", { prefix, account_id }),
+  "search.query": (request: SearchRequest) => call<Page>("search_query", { request }),
+  "message.snooze": (message_ids: number[], due_utc: number) =>
+    call<number>("message_snooze", { message_ids, due_utc }),
+  "message.unsnooze": (message_ids: number[]) => call<null>("message_unsnooze", { message_ids }),
+  "message.mute": (thread_id: number) => call<null>("message_mute", { thread_id }),
+  "message.unmute": (thread_id: number) => call<null>("message_unmute", { thread_id }),
+  "message.add_label": (message_ids: number[], folder_id: number) =>
+    call<number>("message_add_label", { message_ids, folder_id }),
+  "message.remove_label": (message_ids: number[], folder_id: number) =>
+    call<number>("message_remove_label", { message_ids, folder_id }),
+  "rules.list": () => call<RuleView[]>("rules_list"),
+  "rules.save": (rule: RuleView) => call<RuleView[]>("rules_save", { rule }),
+  "rules.delete": (id: number) => call<RuleView[]>("rules_delete", { id }),
+  "rules.reorder": (ids: number[]) => call<RuleView[]>("rules_reorder", { ids }),
+  "rules.run_now": () => call<RuleView[]>("rules_run_now"),
+  "templates.list": () => call<TemplateView[]>("templates_list"),
+  "templates.save": (template: TemplateView) => call<TemplateView[]>("templates_save", { template }),
+  "templates.delete": (id: number) => call<TemplateView[]>("templates_delete", { id }),
+  /** Fills an empty subject; the composer puts the returned body at the cursor (18.4). */
+  "draft.apply_template": (draft_id: number, template_id: number) =>
+    call<TemplateView>("draft_apply_template", { draft_id, template_id }),
 } as const;
 
 /** Event payloads (section 3, event table). */
@@ -415,6 +512,7 @@ export interface EventMap {
   "pending-count": { total: number };
   "op-failed": { account_id: number; op_id: number; kind: OpKind; error: AppError };
   "oauth-done": { account_id: number; ok: boolean; error: AppError | null };
+  "snooze-due": { account_id: number; message_id: number };
   "outbox-state": {
     outbox_id: number;
     account_id: number;

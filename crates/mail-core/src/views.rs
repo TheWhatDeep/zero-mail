@@ -357,6 +357,11 @@ pub struct MessageView {
     pub labels: Option<Vec<LabelView>>,
     /// Gmail's `\Important`, shown as a read-only badge.
     pub important: bool,
+    pub thread_id: i64,
+    /// The thread is muted (section 18.5).
+    pub muted: bool,
+    /// When a snoozed message comes back, UTC (section 18.2); the reader offers Unsnooze.
+    pub snoozed_until: Option<i64>,
 }
 
 /// A folder's display name: Inbox, or the last segment of its path.
@@ -423,6 +428,9 @@ pub fn message_view(
         delete_is_permanent: body.delete_is_permanent,
         labels: None,
         important: false,
+        thread_id: m.thread_id,
+        muted: false,
+        snoozed_until: None,
     }
 }
 

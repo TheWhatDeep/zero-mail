@@ -138,6 +138,7 @@ describe("the outbox view", () => {
     send_after_utc: 0,
     created_at: 0,
     draft_id: null,
+    late: false,
   });
 
   it("badges failed and unknown items and hides sent history", () => {

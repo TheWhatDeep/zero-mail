@@ -24,8 +24,21 @@
   }
 
   function active(f: FolderView): boolean {
-    return app.outboxAccount === null && app.selected?.account_id === f.account_id && app.selected.folder_id === f.id;
+    return (
+      app.outboxAccount === null &&
+      !app.unified &&
+      !app.search &&
+      app.selected?.account_id === f.account_id &&
+      app.selected.folder_id === f.id
+    );
   }
+
+  /** All Inboxes counts every enabled account's INBOX (section 11). */
+  const unifiedUnread = $derived(
+    app.accounts
+      .filter((a) => a.enabled)
+      .reduce((n, a) => n + (app.folders[a.id]?.find((f) => f.role === "inbox")?.unread ?? 0), 0),
+  );
 
   /** Compose from the account in view (section 11, Compose; SPEC_GAPS G63). */
   function compose(): void {
@@ -42,6 +55,22 @@
     </button>
   </div>
   <div class="accounts">
+    <ul class="top">
+      <li>
+        <button
+          class="item tint"
+          class:is-active={app.unified && !app.search && app.outboxAccount === null}
+          aria-current={app.unified ? "page" : undefined}
+          onclick={() => app.openUnified()}
+        >
+          <span class="icon"><Icon name="tray" size="--icon-17" /></span>
+          <span class="name">{strings.allInboxes}</span>
+          {#if unifiedUnread > 0}
+            <span class="badge" class:solid={app.unified}>{unifiedUnread.toLocaleString("en")}</span>
+          {/if}
+        </button>
+      </li>
+    </ul>
     {#each app.accounts as account (account.id)}
       {@const attention = needsAction(app.outbox[account.id] ?? [])}
       {@const open = app.outboxAccount === account.id}

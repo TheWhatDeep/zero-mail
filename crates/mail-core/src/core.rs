@@ -651,6 +651,8 @@ where
                 .is_none_or(|h| crate::mailbox::delete_is_permanent(&folders, h)),
         };
         let mut view = views::message_view(&message, &attachments, info);
+        view.muted = self.store.thread_muted(message.thread_id).await?;
+        view.snoozed_until = self.store.get_snooze(message_id).await?.map(|s| s.due_utc);
         if let Some(stored) = self.store.gm_labels(message_id).await? {
             // The labels are the folders the message is in (section 18.1), read from the
             // rows, so a label just added or removed shows at once.

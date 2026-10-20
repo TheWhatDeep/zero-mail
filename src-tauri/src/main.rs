@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mail_core::compose::{DraftContent, DraftView, IdentityView, OutboxView};
+use mail_core::features::{RuleView, TemplateView};
+use mail_core::search::SearchRequest;
 use mail_core::views::{
     AddressView, FlagChange, FolderView, ListRequest, MessageView, PageView, Role,
 };
@@ -631,6 +633,123 @@ async fn contacts_suggest(
     core.0.contacts_suggest(&prefix, account_id).await
 }
 
+#[tauri::command(rename_all = "snake_case")]
+async fn search_query(
+    core: tauri::State<'_, CoreState>,
+    request: SearchRequest,
+) -> Result<PageView, AppError> {
+    core.0.search_query(request).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_snooze(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    due_utc: i64,
+) -> Result<i64, AppError> {
+    core.0.message_snooze(&message_ids, due_utc).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_unsnooze(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+) -> Result<(), AppError> {
+    core.0.message_unsnooze(&message_ids).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_mute(core: tauri::State<'_, CoreState>, thread_id: i64) -> Result<(), AppError> {
+    core.0.message_mute(thread_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_unmute(core: tauri::State<'_, CoreState>, thread_id: i64) -> Result<(), AppError> {
+    core.0.message_unmute(thread_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_add_label(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    folder_id: i64,
+) -> Result<i64, AppError> {
+    core.0.message_add_label(&message_ids, folder_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn message_remove_label(
+    core: tauri::State<'_, CoreState>,
+    message_ids: Vec<i64>,
+    folder_id: i64,
+) -> Result<i64, AppError> {
+    core.0.message_remove_label(&message_ids, folder_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rules_list(core: tauri::State<'_, CoreState>) -> Result<Vec<RuleView>, AppError> {
+    core.0.rules_list().await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rules_save(
+    core: tauri::State<'_, CoreState>,
+    rule: RuleView,
+) -> Result<Vec<RuleView>, AppError> {
+    core.0.rules_save(rule).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rules_delete(
+    core: tauri::State<'_, CoreState>,
+    id: i64,
+) -> Result<Vec<RuleView>, AppError> {
+    core.0.rules_delete(id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rules_reorder(
+    core: tauri::State<'_, CoreState>,
+    ids: Vec<i64>,
+) -> Result<Vec<RuleView>, AppError> {
+    core.0.rules_reorder(ids).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn rules_run_now(core: tauri::State<'_, CoreState>) -> Result<Vec<RuleView>, AppError> {
+    core.0.rules_run_now().await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn templates_list(core: tauri::State<'_, CoreState>) -> Result<Vec<TemplateView>, AppError> {
+    core.0.templates_list().await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn templates_save(
+    core: tauri::State<'_, CoreState>,
+    template: TemplateView,
+) -> Result<Vec<TemplateView>, AppError> {
+    core.0.templates_save(template).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn templates_delete(
+    core: tauri::State<'_, CoreState>,
+    id: i64,
+) -> Result<Vec<TemplateView>, AppError> {
+    core.0.templates_delete(id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_apply_template(
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+    template_id: i64,
+) -> Result<TemplateView, AppError> {
+    core.0.draft_apply_template(draft_id, template_id).await
+}
+
 /// `mail-body://localhost/<message>?images=0|1&plain=0|1` (section 8, step 3; SPEC_GAPS
 /// G53): the message id and the query. The CSP is a response header, never a meta tag.
 fn mail_body_request(uri: &tauri::http::Uri) -> Option<(i64, String)> {
@@ -827,6 +946,22 @@ fn main() {
             identity_save,
             identity_delete,
             contacts_suggest,
+            search_query,
+            message_snooze,
+            message_unsnooze,
+            message_mute,
+            message_unmute,
+            message_add_label,
+            message_remove_label,
+            rules_list,
+            rules_save,
+            rules_delete,
+            rules_reorder,
+            rules_run_now,
+            templates_list,
+            templates_save,
+            templates_delete,
+            draft_apply_template,
         ])
         // A compose window that closes uploads its draft now (section 7, Drafts).
         .on_window_event(|window, event| {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-unmute"
+description = "Enables the message_unmute command without any pre-configured scope."
+commands.allow = ["message_unmute"]
+
+[[permission]]
+identifier = "deny-message-unmute"
+description = "Denies the message_unmute command without any pre-configured scope."
+commands.deny = ["message_unmute"]

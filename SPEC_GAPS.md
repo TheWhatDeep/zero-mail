@@ -576,20 +576,33 @@ Options:
 - (b) Evaluate `list-id` only while the headers are in memory during sync. A rule that combines `list-id` with a body condition fetches the List-Id header again when the body arrives.
 - (c) Drop `list-id` from the conditions.
 
-## G77. M9 plan details — Resolved by interpretation (owner to ratify)
-- **Where the rules engine lives:** section 3 has no rules module. Rules and mute run in `mail-sync` (`sync` and `ops` are one crate), after each sync of INBOX or a watched folder, and their actions are ordinary `ops`. Core owns the snooze and send-later timers, like the outbox runner.
-- **Once per message across Undo (T40):** a rule's move gives the message a new row in each folder, and `rules_applied` cascades with the old row. When the user undoes a rule's move, Core remembers that message's Message-ID. The returning INBOX row gets `rules_applied` entries instead of running the rules again. The memory lasts an hour and is lost on restart.
+## G77. M9 details — Resolved by interpretation (owner to ratify)
+- **Where rules run:** section 3 has no rules module. Sync reports new rows after each folder sync (not a first sync) and stored bodies, as internal events. A task in `mail-core` runs rules, mute and the snooze timer on them. Every action is an ordinary command (`ops`), with the usual Undo. Rules run on INBOX and watched folders only.
+- **Not new mail:** a message this app itself moves into INBOX or a watched folder is not new mail there, for an hour. That covers Undo, a move back by hand, and the return of a snooze. Rules do not run on it again (T40), and in M10 it will not notify.
+- **Rules:**
+  - A rule's folders are named by path, so a rule for every account files into the folder of that path in each one.
+  - Conditions match case-insensitively, as "contains".
+  - A rule that needs the body waits until the prefetch stores it, and so do the rules after it.
+  - Block sender is a preset rule: from the address, delete, stop. Unblock deletes it.
 - **Snooze:**
-  - The `Snoozed` folder is created on first use; its path is the setting `snooze.folder`.
-  - The snooze row points at the source row until the move runs. The move's executor then header-fetches the copy in `Snoozed` and re-points the row in the same transaction.
-  - At the due time the app queues `-\Seen` and a move back to the origin folder, or to INBOX when the origin is gone (G22), then fires `snooze-due`. The OS notification is M10 (T37's notification part, as G38 split T04).
+  - The `Snoozed` folder is created on first use; its path is the setting `snooze.folder`. Folder ops are now pushed before a folder's message ops, so a first snooze never moves to a folder the server does not have yet.
+  - After the move, its executor header-fetches the copy in `Snoozed` and points the snooze at it, before the source row goes.
+  - At the due time, `-\Seen` and a move back to the origin folder (INBOX when the origin is gone, G22), then `snooze-due`. The OS notification is M10's (T37), as G38 split T04.
   - A reply in a snoozed thread ends the snooze early (setting `snooze.end_on_reply`, default on).
+  - Undo of a snooze also removes the snooze.
+- **Undo race:** an op can start between Undo's look and its cancel. Undo then waits once for it to finish and reverses it, instead of answering "being sent".
+- **Mute:** `$Muted` is set where the folder's PERMANENTFLAGS include `\*`; the executor selects the folder again to read them. A message that arrives with `$Muted` (another install) mutes its thread here. Muting archives only new messages; what is in INBOX stays (section 18.5).
 - **Send later (18.3):**
   - Cancel is `outbox.undo` (back to the draft).
-  - Send now is `outbox.retry` on a queued item, which sets its send time to now.
-  - An item sent more than 60 s after its send time is marked late, and `outbox.list` returns a `late` flag. The Outbox view shows sent history with Sent late.
-- **Templates:** `draft.apply_template {draft_id, template_id}` fills an empty subject, saves the draft, and returns the template's sanitized HTML and text. The compose window inserts that body at the cursor (T41). Save as template stores the draft's subject and bodies.
-- **Mute:** `$Muted` is set where PERMANENTFLAGS include `\*`. A muted thread's new INBOX messages are archived by the rules engine. The no-notification half is M10's (T39).
-- **Thread view:** `list.page` with scope thread takes the current folder too, for the Trash, Junk and Drafts rule (section 10, step 6).
-- **Settings without a screen:** subject grouping (`threads.subject_merge`, default off), Group by conversation, and the snooze settings are setting keys now. Their switches come with Settings in M10. The Rules and Templates management screens are M10 too (section 11, Settings). M9's UI covers: search, All Inboxes, threads, labels, snooze (picker and Snoozed view), Send later and Outbox history, mute, Insert and Save template in compose, and Block sender in the reader.
-
+  - Send now is `outbox.retry` on a queued item.
+  - An item sent more than 60 s after its time is marked late, through a `sent_at` in its envelope; `outbox.list` returns `late`.
+  - The Outbox view shows a Sent history (the newest 50) with Sent late.
+- **Templates:** `draft.apply_template {draft_id, template_id}` fills an empty subject, saves the draft, and returns the template with its HTML sanitized. The composer inserts that body at the cursor (T41). Templates are stored sanitized.
+- **Search:**
+  - `before:` and `after:` dates are UTC midnights.
+  - `from:`, `subject:` and words use FTS5 column filters, with prefix matching on the last word. `to:` and `cc:` narrow by FTS, then match the address lists.
+  - Server search sends what IMAP can express and narrows the rest locally. On Gmail the query goes as `X-GM-RAW` to All Mail, without `account:` terms.
+  - Search lists messages, not threads.
+- **Thread view:** `list.page` with scope thread takes the open folder. Every expanded message is a full reading card; collapsed ones are one line and expand on a click.
+- **New indexes and test speed:** indexes added with v3: `messages(account_id, gm_msgid)`, `messages(account_id, date_utc, id)` and `threads(account_id, subject_norm)` (indexes are the builder's job, section 4). Test builds compile SQLite's C code optimized, so the T30 timing measures SQLite's real speed.
+- **Settings without a screen:** subject grouping (`threads.subject_merge`, default off), Group by conversation (on), and the snooze settings. Their switches come with Settings in M10, and so do the Rules and Templates management screens (section 11, Settings).

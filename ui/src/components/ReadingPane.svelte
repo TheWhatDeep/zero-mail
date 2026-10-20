@@ -5,6 +5,8 @@
   // link clicks and the hovered link. Links open only through decideLink (T21); remote
   // images load only after Load images (T20); attachments are fetched on Open or Save (T23).
   // A message deleted on the server keeps its body with a notice until closed (T04).
+  // M9: Gmail label chips (18.1), Snooze (18.2), Mute (18.5) and Block sender (18.6). In a
+  // thread view each expanded message is one of these cards (`messageId`, `embedded`).
   import { onMount } from "svelte";
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
@@ -15,10 +17,19 @@
   import { bodyUrl, decideLink, type LinkAction } from "../lib/links";
   import { platformUrl, usesHttpScheme } from "../lib/protocol";
   import { applyOpen, bodyArrived, emptyReader, type ReaderState } from "../lib/reader";
+  import { blockRule, labelTargets } from "../lib/labels";
+  import { PRESETS, epoch, fromLocalInput, presetTime, toLocalInput, type Preset } from "../lib/when";
   import { app } from "../state/app.svelte";
-  import { errorText, strings } from "../strings";
+  import { errorText, presetText, strings } from "../strings";
+
+  let { messageId = null, embedded = false }: { messageId?: number | null; embedded?: boolean } = $props();
+  /** The message this card shows: its own, or the list's selection. */
+  const current = $derived(messageId ?? app.message);
 
   let reader = $state<ReaderState>(emptyReader);
+  /** Snooze: the date and time picker is open (section 18.2, pick a date and time). */
+  let pickSnooze = $state(false);
+  let snoozeAt = $state("");
   let frame: HTMLIFrameElement | undefined = $state();
   let frameHeight = $state(0);
   /** Reloads the frame when the body or its images switch changes. */
@@ -44,14 +55,15 @@
     } catch (err) {
       next = applyOpen(reader, id, { ok: false, error: toAppError(err) });
     }
-    if (app.message !== id) return;
+    if (current !== id) return;
     if (bodyArrived(reader, next)) frameKey += 1;
     reader = next;
   }
 
   // A newly selected message.
   $effect(() => {
-    const id = app.message;
+    const id = current;
+    pickSnooze = false;
     frameHeight = 0;
     plain = false;
     pendingLink = null;
@@ -72,7 +84,7 @@
     const s = reader;
     if (s.kind !== "open") return;
     const n = app.changeCount(s.view.account_id, s.view.folder_id);
-    if (n > 0 && app.message === s.view.id) void open(s.view.id);
+    if (n > 0 && current === s.view.id) void open(s.view.id);
   });
 
   // Read state (section 8): shown for 1.5 s, an unread message is marked read, once.
@@ -81,7 +93,7 @@
     if (s.kind !== "open" || !s.view.unread || s.view.body_kind === "loading" || autoReadFor === s.view.id) return;
     const id = s.view.id;
     const timer = setTimeout(() => {
-      if (app.message !== id || autoReadFor === id) return;
+      if (current !== id || autoReadFor === id) return;
       autoReadFor = id;
       void app.act(() => commands["message.set_flags"]([id], { seen: true }));
     }, READ_DELAY_MS);
@@ -97,7 +109,23 @@
     if (ok && op !== undefined) {
       app.toast(text, undo ? op : undefined);
       app.message = null;
+      app.thread = null;
     }
+  }
+
+  /** Snooze until `at` (section 18.2): the message leaves the list, with Undo. */
+  function snooze(id: number, at: Date): void {
+    pickSnooze = false;
+    void undoable(() => commands["message.snooze"]([id], epoch(at)), strings.snoozedToast(readerDateText(epoch(at))));
+  }
+
+  function snoozePreset(id: number, value: string): void {
+    if (value === "pick") {
+      pickSnooze = true;
+      snoozeAt = toLocalInput(presetTime("tomorrow", new Date()));
+      return;
+    }
+    if ((PRESETS as readonly string[]).includes(value)) snooze(id, presetTime(value as Preset, new Date()));
   }
 
   function remove(id: number, permanent: boolean): void {
@@ -169,9 +197,13 @@
 
   const view = $derived(reader.kind === "open" ? reader.view : null);
   const targets = $derived(view ? moveTargets(app.folders[view.account_id] ?? [], view.folder_id) : []);
+  const labelChoices = $derived(
+    view && view.labels ? labelTargets(app.folders[view.account_id] ?? [], view.labels) : [],
+  );
+  const snoozeDate = $derived(fromLocalInput(snoozeAt, new Date()));
 </script>
 
-<section class="card" aria-label={strings.readerLabel}>
+<section class="card" class:embedded aria-label={strings.readerLabel}>
   {#if reader.kind === "empty"}
     <p class="placeholder">{strings.noMessageSelected}</p>
   {:else if reader.kind === "error"}
@@ -216,6 +248,63 @@
           >
             {view.unread ? strings.markRead : strings.markUnread}
           </button>
+          <select
+            class="small move"
+            aria-label={strings.snooze}
+            value=""
+            onchange={(e) => {
+              const v = (e.currentTarget as HTMLSelectElement).value;
+              (e.currentTarget as HTMLSelectElement).value = "";
+              snoozePreset(view.id, v);
+            }}
+          >
+            <option value="" disabled>{strings.snooze}</option>
+            {#each PRESETS as p (p)}
+              <option value={p}>{presetText[p]}</option>
+            {/each}
+            <option value="pick">{strings.pickDateTime}</option>
+          </select>
+          {#if view.snoozed_until !== null}
+            <button class="small tint press" onclick={() => app.act(() => commands["message.unsnooze"]([view.id]))}>
+              {strings.unsnooze}
+            </button>
+          {/if}
+          <button
+            class="small tint press"
+            aria-pressed={view.muted}
+            onclick={() =>
+              app.act(() => (view.muted ? commands["message.unmute"](view.thread_id) : commands["message.mute"](view.thread_id)))}
+          >
+            {view.muted ? strings.unmute : strings.mute}
+          </button>
+          {#if view.from.addr}
+            <button
+              class="small tint press"
+              onclick={() => app.act(async () => {
+                await commands["rules.save"](blockRule(view.from.addr));
+                app.toast(strings.blockedToast(view.from.addr));
+              })}
+            >
+              {strings.blockSender}
+            </button>
+          {/if}
+          {#if labelChoices.length > 0}
+            <select
+              class="small move"
+              aria-label={strings.addLabel}
+              value=""
+              onchange={(e) => {
+                const to = Number((e.currentTarget as HTMLSelectElement).value);
+                (e.currentTarget as HTMLSelectElement).value = "";
+                if (to) void undoable(() => commands["message.add_label"]([view.id], to), strings.labelAddedToast, true);
+              }}
+            >
+              <option value="" disabled>{strings.addLabel}</option>
+              {#each labelChoices as f (f.id)}
+                <option value={f.id}>{f.path}</option>
+              {/each}
+            </select>
+          {/if}
           {#if targets.length > 0}
             <select
               class="small move"
@@ -235,6 +324,21 @@
             </select>
           {/if}
         </div>
+        {#if pickSnooze}
+          <div class="notice confirm" role="dialog" aria-label={strings.pickDateTime}>
+            <input class="when" type="datetime-local" bind:value={snoozeAt} aria-label={strings.pickDateTime} />
+            <span class="actions">
+              <button
+                class="small tint press"
+                disabled={snoozeDate === null}
+                onclick={() => {
+                  if (snoozeDate) snooze(view.id, snoozeDate);
+                }}>{strings.snooze}</button
+              >
+              <button class="small tint press" onclick={() => (pickSnooze = false)}>{strings.cancel}</button>
+            </span>
+          </div>
+        {/if}
         {#if confirmDelete}
           <div class="notice confirm" role="alertdialog" aria-label={strings.deleteForever}>
             <span class="text">{strings.deleteForeverConfirm}</span>
@@ -246,6 +350,27 @@
         {/if}
       {/if}
       <h2 class="subject">{subjectText(view.subject)}</h2>
+      {#if view.labels || view.important || view.snoozed_until !== null || view.muted}
+        <ul class="chips" aria-label={strings.labelsLabel}>
+          {#if view.important}<li class="chip">{strings.important}</li>{/if}
+          {#if view.snoozed_until !== null}<li class="chip">{strings.snoozedUntil(readerDateText(view.snoozed_until))}</li>{/if}
+          {#if view.muted}<li class="chip">{strings.muted}</li>{/if}
+          {#each view.labels ?? [] as l (l.folder_id)}
+            <li class="chip">
+              {l.name}
+              {#if (view.labels?.length ?? 0) > 1}
+                <button
+                  class="chip-x"
+                  aria-label={strings.removeLabel(l.name)}
+                  onclick={() => undoable(() => commands["message.remove_label"]([view.id], l.folder_id), strings.labelRemovedToast, true)}
+                >
+                  <Icon name="x" size="--icon-14" />
+                </button>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
       <div class="sender">
         <Avatar person={view.from} size={32} />
         <div class="who">
@@ -376,9 +501,56 @@
     overflow: hidden;
   }
 
+  .card.embedded {
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .embedded .body {
+    overflow-y: visible;
+  }
+
   .placeholder {
     margin: auto;
     color: var(--color-text-muted);
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-6);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-4);
+    height: var(--button-height-small);
+    padding: 0 var(--space-10);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-pill);
+    font-size: var(--text-meta);
+    color: var(--color-text-muted-strong);
+  }
+
+  .chip-x {
+    display: inline-flex;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--color-text-muted);
+  }
+
+  .when {
+    height: var(--button-height-small);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-small-button);
+    background: var(--color-input-bg);
+    color: var(--color-ink);
+    padding: 0 var(--space-6);
   }
 
   .body {

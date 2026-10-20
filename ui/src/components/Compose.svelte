@@ -3,15 +3,26 @@
   // Bcc, Subject, a rich text body or plain text, attachments by button or drag and drop.
   // The draft is saved locally 5 s after typing stops; Core uploads it 30 s after the last
   // change and when the window closes (section 7). Send warns about an empty subject or a
-  // body that mentions attachments when there are none; red chips block it.
+  // body that mentions attachments when there are none; red chips block it. Send later
+  // schedules the send (section 18.3); Insert template puts a template's body at the cursor
+  // and fills an empty subject; Save as template keeps this draft as one (section 18.4).
   import { onMount, tick, untrack } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import Icon from "./Icon.svelte";
   import RecipientField from "./RecipientField.svelte";
-  import { firstBody, invalidRecipients, sendWarnings, type Block } from "../lib/compose";
-  import { formatSize } from "../lib/format";
-  import { commands, toAppError, type Address, type AppError, type DraftContent, type DraftView } from "../lib/ipc";
-  import { errorText, strings } from "../strings";
+  import { firstBody, insertAt, invalidRecipients, sendWarnings, type Block } from "../lib/compose";
+  import { formatSize, readerDateText } from "../lib/format";
+  import {
+    commands,
+    toAppError,
+    type Address,
+    type AppError,
+    type DraftContent,
+    type DraftView,
+    type TemplateView,
+  } from "../lib/ipc";
+  import { PRESETS, epoch, fromLocalInput, presetTime, toLocalInput, type Preset } from "../lib/when";
+  import { errorText, presetText, strings } from "../strings";
 
   let { view }: { view: DraftView } = $props();
 
@@ -30,6 +41,15 @@
   let confirming = $state<string[] | null>(null);
   let busy = $state(false);
   let linkOpen = $state(false);
+  /** Send later: the date and time picker is open (section 18.3). */
+  let pickLater = $state(false);
+  let laterAt = $state("");
+  let templates = $state<TemplateView[]>([]);
+  /** Save as template: the name being typed. */
+  let templateName = $state<string | null>(null);
+  /** Where the cursor was in the editor, for Insert template (focus moves to the picker). */
+  let savedRange: Range | null = null;
+  let textarea: HTMLTextAreaElement | undefined = $state();
   let linkUrl = $state("");
   let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -139,9 +159,74 @@
     }
   }
 
-  async function send(confirmed = false): Promise<void> {
+  function keepCursor(): void {
+    const sel = window.getSelection();
+    if (editor && sel && sel.rangeCount > 0 && editor.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+      savedRange = sel.getRangeAt(0).cloneRange();
+    }
+  }
+
+  /** Insert template (section 18.4, T41): the body at the cursor; an empty subject is filled. */
+  async function insertTemplate(id: number): Promise<void> {
+    error = null;
+    try {
+      const t = await commands["draft.apply_template"](initial.draft_id, id);
+      if (content.subject.trim() === "") content.subject = t.subject;
+      if (content.plain_only) {
+        const start = textarea?.selectionStart ?? content.text.length;
+        const end = textarea?.selectionEnd ?? start;
+        const next = insertAt(content.text, start, end, t.body_text);
+        content.text = next.text;
+        await tick();
+        textarea?.setSelectionRange(next.cursor, next.cursor);
+      } else if (editor) {
+        editor.focus();
+        const sel = window.getSelection();
+        if (sel && savedRange) {
+          sel.removeAllRanges();
+          sel.addRange(savedRange);
+        }
+        document.execCommand("insertHTML", false, t.body_html);
+      }
+      changed();
+    } catch (err) {
+      error = toAppError(err);
+    }
+  }
+
+  /** Save as template (section 18.4): this draft's subject and bodies under a name. */
+  async function saveTemplate(): Promise<void> {
+    const name = (templateName ?? "").trim();
+    if (!name) return;
+    readEditor();
+    try {
+      templates = await commands["templates.save"]({
+        id: 0,
+        name,
+        subject: content.subject,
+        body_html: content.plain_only ? "" : content.html,
+        body_text: content.text,
+      });
+      templateName = null;
+      notice = strings.templateSaved;
+    } catch (err) {
+      error = toAppError(err);
+    }
+  }
+
+  function laterPreset(value: string): void {
+    if (value === "pick") {
+      pickLater = true;
+      laterAt = toLocalInput(presetTime("tomorrow", new Date()));
+      return;
+    }
+    if ((PRESETS as readonly string[]).includes(value)) void send(false, presetTime(value as Preset, new Date()));
+  }
+
+  async function send(confirmed = false, at: Date | null = null): Promise<void> {
     error = null;
     notice = null;
+    laterFor = at;
     readEditor();
     if (content.to.length + content.cc.length + content.bcc.length === 0) {
       notice = strings.addRecipient;
@@ -164,7 +249,7 @@
     busy = true;
     try {
       await save();
-      await commands["draft.send"](initial.draft_id, identityId);
+      await commands["draft.send"](initial.draft_id, identityId, at ? epoch(at) : null);
       // The app closes this window; the main window shows Undo.
     } catch (err) {
       error = toAppError(err);
@@ -173,7 +258,15 @@
     }
   }
 
+  /** The time a confirmed Send later goes ahead with. */
+  let laterFor: Date | null = null;
+  const laterDate = $derived(fromLocalInput(laterAt, new Date()));
+
   onMount(() => {
+    void commands["templates.list"]().then(
+      (t) => (templates = t),
+      () => (templates = []),
+    );
     if (content.plain_only) {
       // Plain text lives in content.text.
     } else if (content.html.trim() !== "") {
@@ -257,7 +350,7 @@
   </div>
 
   {#if content.plain_only}
-    <textarea class="body" aria-label={strings.messageBody} bind:value={content.text} oninput={changed}></textarea>
+    <textarea class="body" aria-label={strings.messageBody} bind:this={textarea} bind:value={content.text} oninput={changed}></textarea>
   {:else}
     <div
       class="body editor"
@@ -268,6 +361,9 @@
       aria-label={strings.messageBody}
       tabindex="0"
       oninput={changed}
+      onblur={keepCursor}
+      onkeyup={keepCursor}
+      onmouseup={keepCursor}
     ></div>
   {/if}
 
@@ -292,8 +388,31 @@
   {#if confirming}
     <div class="notice" role="alertdialog" aria-label={strings.sendAnyway}>
       <span class="text">{confirming.join(" ")}</span>
-      <button class="small tint press" onclick={() => send(true)}>{strings.sendAnyway}</button>
+      <button class="small tint press" onclick={() => send(true, laterFor)}>{strings.sendAnyway}</button>
       <button class="small tint press" onclick={() => (confirming = null)}>{strings.cancel}</button>
+    </div>
+  {/if}
+  {#if pickLater}
+    <div class="notice" role="dialog" aria-label={strings.sendLater}>
+      <input class="when" type="datetime-local" bind:value={laterAt} aria-label={strings.pickDateTime} />
+      <span class="text">{laterDate ? readerDateText(epoch(laterDate)) : ""}</span>
+      <button
+        class="small tint press"
+        disabled={laterDate === null || busy}
+        onclick={() => {
+          pickLater = false;
+          if (laterDate) void send(false, laterDate);
+        }}>{strings.sendLater}</button
+      >
+      <button class="small tint press" onclick={() => (pickLater = false)}>{strings.cancel}</button>
+      <span class="text">{strings.sendLaterNote}</span>
+    </div>
+  {/if}
+  {#if templateName !== null}
+    <div class="notice" role="dialog" aria-label={strings.saveAsTemplate}>
+      <input class="when" placeholder={strings.templateName} bind:value={templateName} onkeydown={(e) => e.key === "Enter" && saveTemplate()} />
+      <button class="small tint press" disabled={templateName.trim() === ""} onclick={saveTemplate}>{strings.saveAsTemplate}</button>
+      <button class="small tint press" onclick={() => (templateName = null)}>{strings.cancel}</button>
     </div>
   {/if}
   {#if notice}<p class="notice" role="alert">{notice}</p>{/if}
@@ -303,7 +422,41 @@
     <button class="primary press" disabled={busy || identityId === null} onclick={() => send()}>
       <Icon name="paperPlaneTilt" size="--icon-14" />{strings.send}
     </button>
+    <select
+      class="small"
+      aria-label={strings.sendLater}
+      title={strings.sendLaterNote}
+      value=""
+      disabled={busy || identityId === null}
+      onchange={(e) => {
+        const v = (e.currentTarget as HTMLSelectElement).value;
+        (e.currentTarget as HTMLSelectElement).value = "";
+        laterPreset(v);
+      }}
+    >
+      <option value="" disabled>{strings.sendLater}</option>
+      {#each PRESETS as p (p)}
+        <option value={p}>{presetText[p]}</option>
+      {/each}
+      <option value="pick">{strings.pickDateTime}</option>
+    </select>
     <button class="small tint press" onclick={() => attach(null)}><Icon name="paperclip" size="--icon-14" />{strings.attach}</button>
+    <select
+      class="small"
+      aria-label={strings.insertTemplate}
+      value=""
+      onchange={(e) => {
+        const id = Number((e.currentTarget as HTMLSelectElement).value);
+        (e.currentTarget as HTMLSelectElement).value = "";
+        if (id) void insertTemplate(id);
+      }}
+    >
+      <option value="" disabled>{templates.length > 0 ? strings.insertTemplate : strings.noTemplates}</option>
+      {#each templates as t (t.id)}
+        <option value={t.id}>{t.name}</option>
+      {/each}
+    </select>
+    <button class="small tint press" onclick={() => (templateName = content.subject)}>{strings.saveAsTemplate}</button>
     <span class="grow"></span>
     <button class="small tint press" onclick={() => commands["draft.discard"](initial.draft_id).catch((e) => (error = toAppError(e)))}>
       <Icon name="trash" size="--icon-14" />{strings.discard}
@@ -445,6 +598,15 @@
   .meta {
     font-size: var(--text-meta-small);
     color: var(--color-text-muted);
+  }
+
+  .when {
+    height: var(--button-height-small);
+    border: 1px solid var(--color-border-input);
+    border-radius: var(--radius-small-button);
+    background: var(--color-input-bg);
+    color: var(--color-ink);
+    padding: 0 var(--space-6);
   }
 
   .notice {

@@ -723,3 +723,101 @@ None from spec v0.18. v0.17 and v0.18 record the owner's decisions G23, G70, G71
 - **Found by CI:** a test read the database while SQLite still held its Windows file lock; it now waits for the lock to clear.
 - **Size to watch:** the release exe is 22.1 MB, up from 16.2 MB at M4. `oauth2` brings `chrono`, `url` and second copies of `rand` and `sha2`. The 15 MB budget is for the compressed installer, measured at M12.
 
+## M9: done, tagged `m9` (2026-10-21)
+
+Scope: threading, search, unified inbox, labels, snooze, send later, mute, templates and rules. Done when: T25 (the unified, search and thread views, G60), T29, T30, and T36 to T42.
+
+Every check below passes locally on Windows 10. CI: see the run linked in the commit after this report.
+
+### Built
+- **Schema v3 (G74 to G76):**
+  - The table `message_refs` holds each message's ID, In-Reply-To and References.
+  - The column `folders.window_start` holds the start of the sync window.
+  - The column `messages.list_id` holds List-Id for rules.
+  - New indexes: by `gm_msgid`, by account and date, and by subject per account.
+  - A pre-M9 database is threaded once when it opens; existing windows start at their oldest cached message.
+- **Threading (section 10):**
+  - Gmail threads by `X-GM-THRID` only.
+  - Elsewhere, union-find through `message_refs`: a new message finds every thread it links with a few index lookups, out of order or with a missing middle message. A merge relabels the smaller thread and keeps a mute.
+  - Subject grouping within 14 days is a setting, off by default.
+- **Lists (`list.page`):**
+  - Group by conversation: one row per thread by its latest message in the folder, with the message count, unread count and up to 3 participants. Trash, Junk and Drafts are left out unless one is open.
+  - All Inboxes: every enabled account's INBOX, newest first.
+  - The thread view: every folder of the account except Trash, Junk and Drafts, oldest first, each Gmail message once.
+  - A thread page costs about its own rows: 5 ms on 50,000 messages.
+- **Search (`mail-search`):**
+  - The full section 10 syntax: words, phrases, `from:`, `to:`, `cc:`, `bcc:` (G23), `subject:`, `in:` and `label:`, `is:`, `has:attachment`, `filename:`, `before:` and `after:`, `older_than:` and `newer_than:`, `larger:` and `smaller:`, `account:`, `-` and `OR`. Unknown operators are plain words.
+  - Local search uses FTS5 for words and the sender, recipient and subject columns, with prefix matching on the last word. Trash and Junk are out unless named. Gmail messages count once, and the count of messages not indexed is shown.
+  - Search server too runs a `UID SEARCH` of what IMAP can express on the folders in scope (`X-GM-RAW` on Gmail's All Mail). Uncached hits are header-fetched, at most 500, and stay outside the sync window (G75); the local search then narrows them. `search.query` is the command.
+- **Labels (Gmail, 18.1):** `message.add_label` is a `UID COPY` to the label's folder. `message.remove_label` is `\Deleted` plus a `UID EXPUNGE` of that UID in that folder. Both have Undo. The message view shows label chips, read from the rows, and a read-only Important badge; no labels without `X-GM-EXT-1`.
+- **Snooze (18.2):** `message.snooze` and `message.unsnooze`. The Snoozed folder is created on first use, and the snooze follows the moved copy. A due snooze comes back to its origin folder unread and fires `snooze-due`; one missed while closed fires within one tick of the next start. A reply ends a snooze early. Undo works.
+- **Send later (18.3):** Send later in compose (presets, or a date and time) through `draft.send`'s `send_at`. In the Outbox, a scheduled item has Cancel and Send now, and sent items stay as history with Sent late.
+- **Mute (18.5):** `message.mute` and `message.unmute`. `$Muted` goes where PERMANENTFLAGS allow it. New messages in a muted thread are archived, and `$Muted` from another install mutes the thread here.
+- **Rules and Block sender (18.6):** `rules.list`, `rules.save`, `rules.delete`, `rules.reorder` and `rules.run_now`.
+  - Conditions: from, to, cc, subject, list-id, has attachment and body, matched all or any. Actions: move, label, star, mark read, mute, delete, never notify, and stop processing.
+  - Rules run once per message on new INBOX and watched-folder mail. A body condition waits for the prefetch. A message this app moved back is not filed again (G77). Block sender is a preset rule.
+- **Templates (18.4):** `templates.list`, `templates.save`, `templates.delete` and `draft.apply_template`. Insert template puts the body at the cursor and fills an empty subject; Save as template is in compose.
+- **Fixes found on the way:**
+  - Undo while an op was starting answered "being sent"; it now waits and reverses the op.
+  - Folder ops are pushed before a folder's message ops, so a first snooze never targets a folder the server does not have yet.
+- **`app`:** the 16 new commands, added to the capability file.
+- **UI:**
+  - A search box (150 ms debounce, scope toggle, Search server too) and All Inboxes.
+  - Group by conversation, with thread rows, and the thread view: stacked cards, collapsed one-liners.
+  - Snooze presets and a picker, Unsnooze, Mute, Block sender, label chips and Add label.
+  - Send later, Insert template and Save as template in compose; the Outbox history and Send now.
+  - A list whose length the counts cannot give grows as its pages load.
+
+### Tests added (29 local Rust, 1 container, 10 UI; workspace total 255 Rust (9 container tests ignored locally) and 66 UI)
+- **T29 (`mail-store/tests/threads.rs`):** out-of-order replies with a missing middle message form one thread across folders, and the subject-only match stays separate. Also covered:
+  - a bridging reply merges two threads;
+  - one batch links within itself;
+  - subject grouping, as a setting, within 14 days;
+  - Gmail by `X-GM-THRID` only;
+  - refs leave with their message;
+  - 50,000 messages give fast, unique thread pages;
+  - a pre-M9 database is threaded once.
+- **T30:** the 100,000-message fixture: the query's results are exact, and the first page arrives in 11 ms (budget 300 ms). Search server too adds uncached hits, with `has:attachment` narrowed locally.
+- **T42:** `larger:1m older_than:30d -newsletter from:a OR from:b` is correct locally, and with Search server too it adds the uncached old hit; Trash stays out.
+- **T25 (views):** one entry in All Inboxes, in search and in the thread view; thread counts count it once.
+- **Lists:** thread rows with counts and participants; the thread view across folders, with Trash in only when it is open; All Inboxes across two accounts, newest first, without disabled accounts.
+- **T36:** COPY then a targeted UID EXPUNGE, one `gm_msgid`, Undo; refused outside Gmail; no labels on Stalwart.
+- **T37:** a snooze survives a kill and comes back unread within 10 s of the restart, with one `snooze-due`; Undo, and a reply ending it early.
+- **T38:** of three scheduled sends, the cancelled one never reaches SMTP, one fires once, and the third sends after the restart, marked late; Send now.
+- **T39:** a reply in a muted thread is archived; `$Muted` is set only where PERMANENTFLAGS allow; a `$Muted` from another install mutes here.
+- **T40:**
+  - The third rule never runs on the second's matches.
+  - 1,000 messages take 0.35 ms each (budget 1 ms).
+  - Running again changes nothing.
+  - A message moved back is not filed again.
+  - Block sender and unblock work.
+  - Rules run on new mail, and list-id plus body wait for the body.
+- **T41:** a template is saved sanitized; inserting it keeps an existing subject and fills an empty one.
+- **Search parser:** the T30 and T42 queries, phrases, unknown operators and bad values, server keys, `X-GM-RAW`, dates.
+- **Rules engine:** case-insensitive conditions, body waiting, list-id, empty values.
+- **Stalwart (CI):** a message and its reply sent through the app thread together; no labels; Search server too runs a real `UID SEARCH`.
+- **UI:** snooze presets, the thread view's expanded set, list sources, the growing list length, labels and Block sender, Insert template at the cursor, the Outbox history.
+- **Visual check:** conversation rows, the thread view with the new toolbar and chips, search with the not-indexed count (one query for six keystrokes), and compose's Send later, Insert template and Save as template in a browser with stubbed IPC. The template was inserted at the cursor.
+
+### Deviations
+None from spec v0.19. v0.19 records the owner's decisions G74 to G76.
+
+### Gaps found
+- **G74 to G76:** resolved by the owner (`message_refs`, `folders.window_start`, `messages.list_id`).
+- **G77** (interpretations, owner to ratify):
+  - where rules run, and what counts as new mail;
+  - rule folders by path;
+  - the snooze move and its timing;
+  - the Undo race;
+  - mute archiving only new mail;
+  - Cancel and Send now, and Sent late;
+  - templates at the cursor;
+  - search details;
+  - the thread view;
+  - new indexes and the optimized SQLite in tests;
+  - settings without a screen until M10.
+- **Found while testing:**
+  - the Undo race above;
+  - a first snooze could race its folder's CREATE;
+  - an interrupted session left damaged tokio and SQLite build artifacts, cleared by rebuilding them.
+

@@ -932,17 +932,23 @@ pub(crate) fn threads_page(
         });
     }
     let (date, id) = start(cursor);
+    // Newest first by the folder's date index; a row stands for its thread when no newer
+    // message of that thread is listed, so a page costs about its own rows, however big the
+    // folder.
+    let list = in_list(folders);
     let sql = format!(
         concat!(
-            "SELECT * FROM (SELECT ",
+            "SELECT ",
             row_columns!(),
-            ", row_number() OVER (PARTITION BY m.thread_id ORDER BY m.date_utc DESC, m.id DESC) AS rn
-              FROM messages AS m WHERE m.folder_id IN ({}) AND (m.flags & ?1) = 0)
-              WHERE rn = 1 AND (date_utc, id) < (?2, ?3)
-              ORDER BY date_utc DESC, id DESC
+            " FROM messages AS m
+              WHERE m.folder_id IN ({list}) AND (m.flags & ?1) = 0 AND (m.date_utc, m.id) < (?2, ?3)
+                AND NOT EXISTS (SELECT 1 FROM messages AS n
+                    WHERE n.thread_id = m.thread_id AND n.folder_id IN ({list})
+                      AND (n.flags & ?1) = 0 AND (n.date_utc, n.id) > (m.date_utc, m.id))
+              ORDER BY m.date_utc DESC, m.id DESC
               LIMIT ?4"
         ),
-        in_list(folders)
+        list = list
     );
     let mut stmt = conn.prepare_cached(&sql)?;
     let rows = stmt.query_map(params![HIDDEN, date, id, fetch_limit(limit)?], list_row)?;
