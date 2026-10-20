@@ -499,7 +499,7 @@ Stop: the M5–M7 session starts next.
 
 Scope: `render` (parser, sanitizer, protocols, attachments), logging and `log.open` (G51), and `link.open` and `message.save_source` (G52, G54). Done when: T19 to T24.
 
-Every check below passes locally on Windows 10. CI: pending at commit time; recorded below when green.
+Every check below passes locally on Windows 10. CI is green on Windows, in the Stalwart job and in the startup harness with the T19 walk ([run 39360788410](https://github.com/TheWhatDeep/zero-mail/actions/runs/39360788410)).
 
 ### Built
 - **`render` (`mail-render`), the HTML pipeline of section 8, every step at every render (invariant 4):**
@@ -519,21 +519,26 @@ Every check below passes locally on Windows 10. CI: pending at commit time; reco
   - **Links (T21):** only `http`, `https`, `mailto` and `tel`. When the visible text names another host, an inline confirmation shows both hosts; Cancel keeps the user in the app. `mailto` does nothing until compose (M7, G57).
   - **Attachments:** name, size, Open and Save as. Executable types ask first.
   - **Status bar:** the hovered link's real target; the backoff warning opens the log folder.
-- **T19 harness (G56):** `tests/render/xss-harness.mjs` with the `xss_fixture` example. CI's Windows perf job runs it on the release build.
+- **T19 harnesses (G56, G68):**
+  - **CI (`tests/render/xss-walk.mjs`):** WebView2 on GitHub's runner never opens its DevTools port, so CI uses a walk instead (G68). In perf mode with `ZEROMAIL_PERF_WALK` the page opens every corpus message in turn and reports what it opened. The fixture points the corpus beacon at a local HTTP server the harness runs; any request reaching it fails the run, and a control request proves it listens.
+  - **Local (`tests/render/xss-harness.mjs`):** the DevTools harness, which also records CSP-blocked attempts, stays as a tool for the build machine.
 
 ### Tests added (35 local; workspace total 179 Rust (6 container tests ignored locally) and 40 UI)
 - **`mail-render`:** sanitizer structure and URL rewriting, style blocks, the link mark, CSS rewriting (escapes, imports, strings, legacy), plain text (linkify, quote collapse), the CSP, nonces, only images served as images, file names (G55), executable types, encoded names, the LRU cache, temp folders, the proxy (no cookie or referrer across two requests, image only, http only, the size cap).
 - **T19 (Rust half):** 44 corpus cases, each in both URL forms: no forbidden element or attribute, no event handler, no `javascript:`, `vbscript:`, `@import`, `expression(` or foreign URL left in markup or CSS, and exactly one script in the served document.
-- **T19 (webview half):** on the release build here, 44 corpus messages opened through keyboard navigation with the pointer moved over each body, 44 `mail-body` loads seen across the page and its frames, 7 `mail-remote` loads stopped by the CSP, and zero requests to any other host. Any attempt on the beacon host, even one the CSP stopped, would fail the run.
+- **T19 (webview half):**
+  - **Walk (CI and here):** 44 of 44 corpus messages opened in the release build; nothing reached the beacon server.
+  - **DevTools (here):** 44 messages opened through keyboard navigation with the pointer moved over each body, 44 `mail-body` loads seen across the page and its frames, 7 `mail-remote` loads stopped by the CSP, and zero requests to any other host. Any attempt on the beacon host, even one the CSP stopped, would fail the run.
 - **`mail-core` on the fakes:** T20 (nothing fetched before consent, `images=1` ignored without it, the proxy sends no cookie or referrer, allow-once is per session, Always load persists across a restart and matches the sender case-insensitively); T22 (UTF-8, ISO-8859-1, Windows-1252, ISO-2022-JP body and subject, GB2312, Shift_JIS, a bogus label in UTF-8 and in 8-bit, and broken MIME); T23 (the 20 MB part never prefetched, fetched once on Save and then from the cache, `../x` and `CON.txt` saved as `..x` and `_CON.txt`, the executable flag, Open into a random temp folder, temp deleted at quit); T24 (served through `mail-cid`, no `data:` URI, non-image and unknown cids refused); the plain toggle, format=flowed and linkify end to end; Could not display and Save source, and `network` offline; `link.open`'s scheme check.
 - **Stalwart:** an APPENDed multipart message through the real transport: sanitized HTML, the cid image, the base64 attachment saved, and Save source.
 - **`mail-imap`:** multipart parts in the fake, `format=flowed` and RFC 2231 in BODYSTRUCTURE, IMAP trace redaction. **`mail-smtp`:** SMTP trace redaction. **`mail-sync`:** format=flowed, transfer decoding. **`mail-core`:** log rotation keeps 5 files of at most 2 MB; the debug filter adds only the traces.
 - **UI:** link decisions (T21), host parsing and the body URL toggle.
 
 ### Deviations
-None from spec v0.13. v0.13 records the owner's decisions G52–G54 and G56.
+None from spec v0.15. v0.13 records the owner's decisions G52–G54 and G56; v0.15 records G68.
 
 ### Gaps found
 - **G52–G54, G56:** resolved by the owner (see above).
+- **G68:** resolved by the owner: T19's webview half runs in CI as a walk against a local beacon server. Found because the DevTools harness passed here and could not start on the runner.
 - **G55 and G57** (interpretations, owner to ratify): Windows-safe file names; the proxy's overall limit of 4; `images=1` only with consent; `mailto` inert until M7; the link host rule; where logs, cache and temp files live; the debug setting and what the traces redact.
 - **For later (not in M5's scope):** the proxy fetches whatever host an allowed image names, as a browser would, including the local network; blocking private addresses would be a spec change. Read state after 1.5 s needs `message.set_flags` (M6).
