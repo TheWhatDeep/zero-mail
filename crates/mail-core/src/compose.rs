@@ -819,6 +819,8 @@ where
             "subject": content.subject,
             "to_display": content.to.iter().chain(&content.cc).map(|a| a.addr.clone()).collect::<Vec<_>>(),
             "recipients": recipients,
+            // Bcc is never in a header; the outbox history keeps it for `bcc:` search (G23).
+            "bcc": content.bcc.iter().map(|a| a.addr.clone()).collect::<Vec<_>>(),
             "original": content.original,
             "mode": content.mode,
             "message_id": built.message_id,

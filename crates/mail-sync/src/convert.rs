@@ -83,6 +83,9 @@ pub(crate) fn new_message(
         in_reply_to,
         refs,
         gm_labels: gmail.then(|| h.gm_labels.clone()),
+        list_id: header
+            .and_then(|m| m.header_raw("List-Id"))
+            .and_then(list_id),
         thread_id: 0,
         subject: header
             .and_then(|m| m.subject())
@@ -101,6 +104,18 @@ pub(crate) fn new_message(
         body_state: BodyState::None,
         attachments,
     }
+}
+
+/// The list identifier of a `List-Id` header (RFC 2919): the part in angle brackets,
+/// lowercased; a header without brackets is taken whole.
+fn list_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let id = match (raw.rfind('<'), raw.rfind('>')) {
+        (Some(open), Some(close)) if open < close => &raw[open + 1..close],
+        _ => raw,
+    };
+    let id = id.trim().to_lowercase();
+    (!id.is_empty()).then_some(id)
 }
 
 fn bare_id(id: &str) -> String {
@@ -173,6 +188,16 @@ pub(crate) fn attachments(root: &BodyPart) -> Vec<NewAttachment> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn list_ids() {
+        assert_eq!(
+            super::list_id("Weekly News <News.Example.COM>"),
+            Some("news.example.com".to_string())
+        );
+        assert_eq!(super::list_id(" plain.list "), Some("plain.list".into()));
+        assert_eq!(super::list_id("  "), None);
+    }
+
     use super::*;
 
     fn header(raw: &str) -> FetchedHeader {

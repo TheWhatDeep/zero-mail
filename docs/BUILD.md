@@ -224,9 +224,9 @@ folders(id, account_id, path, delimiter, special_use NULL /* inbox sent drafts t
   window_start /* sync window start, UTC; older stored messages are outside the window, SPEC_GAPS G75 */,
   UNIQUE(account_id, path))
 messages(id, account_id, folder_id, uid, gm_msgid NULL, gm_thrid NULL, message_id, in_reply_to NULL, refs NULL,
-  gm_labels_json NULL, list_id NULL /* SPEC_GAPS G76 */, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
+  gm_labels_json NULL, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
   date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted or pending move/delete (hidden, SPEC_GAPS G19, G59) */,
-  has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, UNIQUE(folder_id, uid))
+  has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, list_id NULL /* SPEC_GAPS G76 */, UNIQUE(folder_id, uid))
 bodies(message_id, text_plain, text_html, fetched_at)
 attachments(id, message_id, part_id, filename, mime, size, content_id NULL, is_inline)
 threads(id, account_id, last_date_utc, subject_norm)

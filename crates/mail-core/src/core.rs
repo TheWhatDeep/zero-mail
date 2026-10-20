@@ -26,9 +26,7 @@ use tokio::time::Instant;
 
 use crate::accounts::{AccountConfig, AccountSummary, Accounts, Candidate, TestReport};
 use crate::error::{AppError, ErrorCode};
-use crate::views::{
-    self, BodyInfo, ListRequest, MessageView, PageView, RemoteImages, RowView, Scope,
-};
+use crate::views::{self, BodyInfo, MessageView, RemoteImages};
 
 /// `store-changed` is debounced to this window (section 3).
 pub const STORE_CHANGED_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -386,7 +384,7 @@ where
         }
     }
 
-    async fn with_actor(&self, account_id: AccountId, f: impl FnOnce(&AccountHandle)) {
+    pub(crate) async fn with_actor(&self, account_id: AccountId, f: impl FnOnce(&AccountHandle)) {
         if let Some(h) = self.actors.lock().await.get(&account_id) {
             f(h);
         }
@@ -573,40 +571,6 @@ where
     ) -> Result<(), AppError> {
         self.with_actor(account_id, |h| h.refresh(folder_id)).await;
         Ok(())
-    }
-
-    /// `list.page`. A first page (no cursor) also tells the actor the folder is open, so it
-    /// syncs now and every 5 minutes (section 6, step 9).
-    pub async fn list_page(&self, request: ListRequest) -> Result<PageView, AppError> {
-        let folder_id = match request.scope {
-            Scope::Folder { folder_id } => folder_id,
-            Scope::Unified | Scope::Search { .. } | Scope::Thread { .. } => {
-                return Err(AppError::new(ErrorCode::Unsupported, "arrives in M9"));
-            }
-        };
-        if request.group_by_thread {
-            return Err(AppError::new(
-                ErrorCode::Unsupported,
-                "threads arrive in M9",
-            ));
-        }
-        if request.cursor.is_none() {
-            let folder = self.store.get_folder(folder_id).await?;
-            self.with_actor(folder.account_id, |h| h.open_folder(Some(folder_id)))
-                .await;
-        }
-        let page = self
-            .store
-            .folder_page(
-                folder_id,
-                request.cursor.map(Into::into),
-                request.limit.clamp(1, 500),
-            )
-            .await?;
-        Ok(PageView {
-            rows: page.rows.iter().map(RowView::from).collect(),
-            next: page.next.map(Into::into),
-        })
     }
 
     /// `message.open`. An uncached body is fetched ahead of everything else; the reader

@@ -11,3 +11,6 @@ workspace = true
 [dependencies]
 mail-store.workspace = true
 mail-imap.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }

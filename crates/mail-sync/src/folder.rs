@@ -132,6 +132,8 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
     let first = folder.synced_at == 0;
     let candidates: Vec<u32> = if first {
         let since = now() - i64::from(ctx.sync_days) * 86_400;
+        // The window starts here; Load older moves it back (SPEC_GAPS G75).
+        store.set_window_start(folder_id, since, false).await?;
         t.uid_search(&SearchKey::Since(ImapDate::from_epoch(since)))
             .await?
     } else {
@@ -266,10 +268,15 @@ pub(crate) async fn extend_window<T: ImapTransport>(
         // A changed mailbox: the regular sync purges and starts over.
         return sync_folder(t, ctx, folder_id).await.map(|_| ());
     }
-    let start = store
-        .oldest_internal(folder_id)
-        .await?
-        .unwrap_or_else(|| now() - i64::from(ctx.sync_days) * 86_400);
+    // The window start, not the oldest cached message: a server-search hit from years ago
+    // is outside the window and must not make Load older skip the years between (G75).
+    let start = match folder.window_start {
+        0 => store
+            .oldest_internal(folder_id)
+            .await?
+            .unwrap_or_else(|| now() - i64::from(ctx.sync_days) * 86_400),
+        w => w,
+    };
     let day = 86_400;
     let range = |end: i64| {
         SearchKey::And(vec![
@@ -284,6 +291,7 @@ pub(crate) async fn extend_window<T: ImapTransport>(
         v
     };
     let mut missing = fresh(t.uid_search(&range(start)).await?);
+    let mut new_start = start - crate::EXTEND_DAYS * day;
     if missing.is_empty() {
         // Nothing in the 90 days: start from the newest older message on the server.
         let older = fresh(
@@ -296,6 +304,7 @@ pub(crate) async fn extend_window<T: ImapTransport>(
                 .await?;
             if let Some(h) = h.first() {
                 missing = fresh(t.uid_search(&range(h.internal_date)).await?);
+                new_start = h.internal_date - crate::EXTEND_DAYS * day;
             }
         }
     }
@@ -325,6 +334,7 @@ pub(crate) async fn extend_window<T: ImapTransport>(
             folder_id: Some(folder_id),
         });
     }
+    store.set_window_start(folder_id, new_start, true).await?;
     store
         .finish_folder_sync(
             folder_id,
@@ -384,6 +394,7 @@ mod tests {
             unread: 0,
             total: 0,
             synced_at: 0,
+            window_start: 0,
         }
     }
 

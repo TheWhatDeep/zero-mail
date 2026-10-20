@@ -11,9 +11,11 @@ mod ops;
 mod outbox;
 mod queries;
 mod schema;
+mod threads;
 mod types;
 
 pub use error::{Result, StoreError};
+pub use threads::{subject_norm, SUBJECT_MERGE_SETTING};
 pub use types::*;
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
@@ -70,7 +72,12 @@ impl Store {
         writer.pragma_update(None, "synchronous", "FULL")?;
         writer.pragma_update(None, "foreign_keys", true)?;
         writer.busy_timeout(BUSY_TIMEOUT)?;
-        schema::migrate(&mut writer)?;
+        let before = schema::migrate(&mut writer)?;
+        if before < schema::THREADING_VERSION {
+            let tx = writer.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            threads::rethread_all(&tx)?;
+            tx.commit()?;
+        }
 
         let mut readers = Vec::with_capacity(READERS);
         for _ in 0..READERS {
@@ -538,6 +545,18 @@ impl Store {
             .await
     }
 
+    /// Sets a folder's sync window start; `only_back` lets Load older move it earlier only
+    /// (SPEC_GAPS G75).
+    pub async fn set_window_start(
+        &self,
+        folder_id: FolderId,
+        start: i64,
+        only_back: bool,
+    ) -> Result<()> {
+        self.write(move |tx| queries::set_window_start(tx, folder_id, start, only_back))
+            .await
+    }
+
     pub async fn oldest_internal(&self, folder_id: FolderId) -> Result<Option<i64>> {
         self.read(move |conn| ops::oldest_internal(conn, folder_id))
             .await
@@ -713,6 +732,59 @@ impl Store {
         limit: u32,
     ) -> Result<Page> {
         self.read(move |conn| queries::folder_page(conn, folder_id, cursor, limit))
+            .await
+    }
+
+    /// One page across several folders (All Inboxes), newest first, after `cursor`.
+    pub async fn folders_page(
+        &self,
+        folders: Vec<FolderId>,
+        cursor: Option<Cursor>,
+        limit: u32,
+    ) -> Result<Page> {
+        self.read(move |conn| queries::folders_page(conn, &folders, cursor, limit))
+            .await
+    }
+
+    /// One page of threads among `folders` (section 10, rule 5). Counts leave out
+    /// `exclude`.
+    pub async fn threads_page(
+        &self,
+        folders: Vec<FolderId>,
+        exclude: Vec<FolderId>,
+        cursor: Option<Cursor>,
+        limit: u32,
+    ) -> Result<ThreadPage> {
+        self.read(move |conn| queries::threads_page(conn, &folders, &exclude, cursor, limit))
+            .await
+    }
+
+    /// A thread's messages outside `exclude`, oldest first, each Gmail message once
+    /// (section 10, rule 6).
+    pub async fn thread_messages(
+        &self,
+        thread: ThreadId,
+        exclude: Vec<FolderId>,
+        prefer: Option<FolderId>,
+    ) -> Result<Vec<ListRow>> {
+        self.read(move |conn| queries::thread_messages(conn, thread, &exclude, prefer))
+            .await
+    }
+
+    /// One page of a search (section 10), newest first, after `cursor`.
+    pub async fn query_page(
+        &self,
+        query: SearchSql,
+        cursor: Option<Cursor>,
+        limit: u32,
+    ) -> Result<Page> {
+        self.read(move |conn| queries::query_page(conn, &query, cursor, limit))
+            .await
+    }
+
+    /// How many messages a search clause matches.
+    pub async fn query_count(&self, query: SearchSql) -> Result<u32> {
+        self.read(move |conn| queries::query_count(conn, &query))
             .await
     }
 

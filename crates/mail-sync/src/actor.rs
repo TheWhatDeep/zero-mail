@@ -71,6 +71,8 @@ enum Command {
     OpsQueued(Option<FolderId>),
     /// Load older: 90 more days (`folder.extend_window`).
     Extend(FolderId),
+    /// Search server too (section 10): the number of hits stored.
+    Search(ServerSearch, Reply<usize>),
     OpenFolder(Option<FolderId>),
     AccountChanged,
     Retry,
@@ -140,6 +142,18 @@ impl AccountHandle {
     /// `folder.extend_window`: fetch the 90 days before the folder's oldest cached message.
     pub fn extend_window(&self, folder_id: FolderId) {
         let _ = self.commands.send(Command::Extend(folder_id));
+    }
+
+    /// Search server too (section 10): runs the search on the server and header-fetches
+    /// the hits that are not cached into the store, newest first, at most `cap`. The
+    /// receiver gets how many hits are stored, or closes when the account is offline.
+    pub fn server_search(
+        &self,
+        search: ServerSearch,
+    ) -> oneshot::Receiver<Result<usize, SyncError>> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.commands.send(Command::Search(search, Reply(Some(tx))));
+        rx
     }
 
     /// The folder open in the UI: it syncs now and every 5 minutes while open.
@@ -251,6 +265,18 @@ enum Job {
     FolderOps,
     /// Load older for one folder.
     Extend(FolderId),
+    /// A server search the user is waiting for.
+    Search(ServerSearch, Reply<usize>),
+}
+
+/// What Search server too sends (section 10): `UID SEARCH` with `key` on `folders`, or on
+/// Gmail `X-GM-RAW` with `gmail_raw` on All Mail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerSearch {
+    pub folders: Vec<FolderId>,
+    pub key: Option<mail_imap::SearchKey>,
+    pub gmail_raw: Option<String>,
+    pub cap: usize,
 }
 
 impl Job {
@@ -488,7 +514,8 @@ where
                         | Command::FetchBody(..)
                         | Command::FetchPart(..)
                         | Command::OpsQueued(_)
-                        | Command::Extend(_),
+                        | Command::Extend(_)
+                        | Command::Search(..),
                     ) => {}
                 },
             }
@@ -507,7 +534,8 @@ where
                     | Command::FetchBody(..)
                     | Command::FetchPart(..)
                     | Command::OpsQueued(_)
-                    | Command::Extend(_),
+                    | Command::Extend(_)
+                    | Command::Search(..),
                 ) => {}
             }
         }
@@ -738,6 +766,9 @@ where
                     queue.push(Priority::User, Job::Extend(id));
                 }
             }
+            Command::Search(search, reply) => {
+                queue.push(Priority::User, Job::Search(search, reply));
+            }
             Command::OpenFolder(f) => {
                 self.open_folder = f;
                 open_tick.reset();
@@ -917,6 +948,14 @@ async fn run_job<T: ImapTransport>(
             reply.send(result.clone());
             result?;
         }
+        Job::Search(search, mut reply) => {
+            let result = server_search(t, ctx, selected, folders, &search).await;
+            let failed = result.as_ref().err().cloned();
+            reply.send(result);
+            if let Some(e) = failed {
+                return Err(e);
+            }
+        }
         Job::Part(message_id, part_id, mut reply) => {
             let result = fetch_part(t, ctx, selected, queue, message_id, &part_id).await;
             let failed = result.as_ref().err().cloned();
@@ -927,6 +966,90 @@ async fn run_job<T: ImapTransport>(
         }
     }
     Ok(())
+}
+
+/// Search server too (section 10): each folder's hits, newest first, until `cap`; the ones
+/// not cached are header-fetched into the store. Hits older than a folder's sync window
+/// stay outside it (SPEC_GAPS G75). A folder never synced (Gmail's All Mail) is searched
+/// all the same.
+async fn server_search<T: ImapTransport>(
+    t: &mut T,
+    ctx: &Ctx<'_>,
+    selected: &mut Option<FolderId>,
+    folders: &[Folder],
+    search: &ServerSearch,
+) -> Result<usize, SyncError> {
+    use mail_imap::SearchKey;
+    let targets: Vec<(&Folder, SearchKey)> = match (&search.gmail_raw, ctx.caps.gmail) {
+        (Some(raw), true) => folders
+            .iter()
+            .filter(|f| f.special_use == Some(mail_store::SpecialUse::All))
+            .map(|f| (f, SearchKey::GmailRaw(raw.clone())))
+            .collect(),
+        _ => match &search.key {
+            Some(key) => folders
+                .iter()
+                .filter(|f| search.folders.contains(&f.id))
+                .map(|f| (f, key.clone()))
+                .collect(),
+            None => Vec::new(),
+        },
+    };
+    let mut remaining = search.cap;
+    let mut stored = 0;
+    for (folder, key) in targets {
+        if remaining == 0 {
+            break;
+        }
+        *selected = None;
+        let info = t.select(&folder.path).await?;
+        *selected = Some(folder.id);
+        if folder.uidvalidity == 0 {
+            ctx.store
+                .set_uidvalidity(folder.id, info.uidvalidity)
+                .await?;
+        } else if folder.uidvalidity != info.uidvalidity {
+            // A changed mailbox: its regular sync purges it first.
+            continue;
+        }
+        let mut hits = t.uid_search(&key).await?;
+        hits.sort_unstable_by(|a, b| b.cmp(a));
+        hits.dedup();
+        hits.truncate(remaining);
+        remaining -= hits.len();
+        let known: std::collections::HashSet<u32> = ctx
+            .store
+            .cached_uids(folder.id)
+            .await?
+            .into_iter()
+            .collect();
+        let missing: Vec<u32> = hits.into_iter().filter(|u| !known.contains(u)).collect();
+        for batch in missing.chunks(FETCH_BATCH) {
+            let headers = t
+                .uid_fetch_headers(
+                    &UidSet::new(batch.iter().copied()),
+                    HeaderFetch {
+                        gmail: ctx.caps.gmail,
+                    },
+                )
+                .await?;
+            let rows: Vec<_> = headers
+                .iter()
+                .map(|h| {
+                    crate::convert::new_message(h, ctx.account_id, folder.id, now(), ctx.caps.gmail)
+                })
+                .collect();
+            stored += rows.len();
+            if !rows.is_empty() {
+                ctx.store.insert_synced(folder.id, rows).await?;
+            }
+        }
+        ctx.events.send(SyncEvent::StoreChanged {
+            account_id: ctx.account_id,
+            folder_id: Some(folder.id),
+        });
+    }
+    Ok(stored)
 }
 
 /// Fetches and stores the body of a message the user opened.

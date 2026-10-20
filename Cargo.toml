@@ -89,6 +89,11 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 
+# SQLite's C code is optimized in test builds too, so the section 14 search and list
+# timings measured by tests (T30) are SQLite's real speed, not an -O0 build's.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
 [profile.release]
 codegen-units = 1
 lto = true

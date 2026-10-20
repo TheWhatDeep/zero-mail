@@ -167,14 +167,26 @@ pub fn folder_views(folders: &[Folder]) -> Vec<FolderView> {
         .collect()
 }
 
-/// `list.page` scope (section 3). M4 lists folders; the other scopes arrive in M9.
+/// `list.page` scope (section 3). A thread takes the open folder, for the Trash, Junk and
+/// Drafts rule (section 10, rule 6; SPEC_GAPS G77).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Scope {
-    Folder { folder_id: i64 },
+    Folder {
+        folder_id: i64,
+    },
     Unified,
-    Search { query: String },
-    Thread { thread_id: i64 },
+    Search {
+        query: String,
+        /// `None`: every account (section 10, Scope).
+        #[serde(default)]
+        account_id: Option<i64>,
+    },
+    Thread {
+        thread_id: i64,
+        #[serde(default)]
+        folder_id: Option<i64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +237,16 @@ pub struct RowView {
     pub flagged: bool,
     pub has_attach: bool,
     pub preview: String,
+    /// With Group by conversation: the thread this row stands for (section 10, rule 5).
+    pub thread: Option<ThreadInfo>,
+}
+
+/// A thread row's counts and up to 3 participant names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThreadInfo {
+    pub messages: u32,
+    pub unread: u32,
+    pub participants: Vec<String>,
 }
 
 impl From<&ListRow> for RowView {
@@ -242,6 +264,7 @@ impl From<&ListRow> for RowView {
             flagged: r.flags.contains(Flags::FLAGGED),
             has_attach: r.has_attach,
             preview: r.preview.clone(),
+            thread: None,
         }
     }
 }
@@ -250,6 +273,9 @@ impl From<&ListRow> for RowView {
 pub struct PageView {
     pub rows: Vec<RowView>,
     pub next: Option<CursorView>,
+    /// Search only, first page: messages in scope whose body is not indexed yet; the UI
+    /// offers Search server too (section 10).
+    pub unindexed: Option<u32>,
 }
 
 /// How the reader shows the body.
@@ -401,6 +427,7 @@ mod tests {
             unread: 0,
             total: 0,
             synced_at: 0,
+            window_start: 0,
         }
     }
 

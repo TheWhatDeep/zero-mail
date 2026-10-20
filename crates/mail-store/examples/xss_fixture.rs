@@ -102,6 +102,7 @@ async fn main() {
                 in_reply_to: None,
                 refs: None,
                 gm_labels: None,
+                list_id: None,
                 thread_id: 0,
                 subject: format!("XSS: {name}"),
                 from: Address {

@@ -60,6 +60,7 @@ const SPEC: &[(&str, &[&str])] = &[
             "unread",
             "total",
             "synced_at",
+            "window_start",
         ],
     ),
     (
@@ -89,6 +90,7 @@ const SPEC: &[(&str, &[&str])] = &[
             "has_attach",
             "preview",
             "body_state",
+            "list_id",
         ],
     ),
     (
@@ -163,6 +165,7 @@ const SPEC: &[(&str, &[&str])] = &[
             "use_count",
         ],
     ),
+    ("message_refs", &["account_id", "ref", "message_id"]),
     ("remote_image_allow", &["account_id", "sender_addr"]),
     (
         "snoozes",
@@ -208,6 +211,7 @@ const NULLABLE: &[(&str, &str)] = &[
     ("messages", "in_reply_to"),
     ("messages", "refs"),
     ("messages", "gm_labels_json"),
+    ("messages", "list_id"),
     ("attachments", "content_id"),
     ("drafts", "imap_uid"),
     ("drafts", "uploaded_at"),

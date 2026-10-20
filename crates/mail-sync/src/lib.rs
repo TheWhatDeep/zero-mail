@@ -16,7 +16,7 @@ mod convert;
 mod folder;
 pub mod ops;
 
-pub use actor::{login_request, spawn_account, AccountHandle, SyncDeps};
+pub use actor::{login_request, spawn_account, AccountHandle, ServerSearch, SyncDeps};
 pub use body::preview;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

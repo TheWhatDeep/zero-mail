@@ -283,9 +283,9 @@ pub(crate) fn insert_messages(
         "INSERT INTO messages (account_id, folder_id, uid, gm_msgid, gm_thrid, message_id,
              in_reply_to, refs, gm_labels_json, thread_id, subject, from_name, from_addr, to_json,
              cc_json, reply_to_json, date_utc, internal_utc, size, flags, has_attach, preview,
-             body_state)
+             body_state, list_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20, ?21, ?22, ?23)",
+             ?19, ?20, ?21, ?22, ?23, ?24)",
     )?;
     let mut attach = tx.prepare_cached(
         "INSERT INTO attachments (message_id, part_id, filename, mime, size, content_id, is_inline)
@@ -322,6 +322,7 @@ pub(crate) fn insert_messages(
             m.has_attach,
             m.preview,
             m.body_state.as_sql(),
+            m.list_id,
         ])?;
         let id = tx.last_insert_rowid();
         for a in &m.attachments {
@@ -380,7 +381,7 @@ pub(crate) fn put_body(
 }
 
 const FOLDER_COLUMNS: &str = "id, account_id, path, delimiter, special_use, uidvalidity, uidnext,
-    highestmodseq, sync_enabled, watch_idle, unread, total, synced_at";
+    highestmodseq, sync_enabled, watch_idle, unread, total, synced_at, window_start";
 
 fn folder_row(r: &Row) -> rusqlite::Result<Folder> {
     let special_use: Option<String> = r.get(4)?;
@@ -405,6 +406,7 @@ fn folder_row(r: &Row) -> rusqlite::Result<Folder> {
         unread: r.get(10)?,
         total: r.get(11)?,
         synced_at: r.get(12)?,
+        window_start: r.get(13)?,
     })
 }
 
@@ -524,9 +526,8 @@ pub(crate) fn cached_uids(conn: &Connection, folder_id: FolderId) -> Result<Vec<
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Inserts synced headers and assigns threads (SPEC_GAPS G36): a message with an
-/// `X-GM-THRID` joins the account's thread for it, every other message gets its own
-/// thread until M9. The input `thread_id` is ignored.
+/// Inserts synced headers and assigns threads (section 10; `threads`): one message at a
+/// time, so a batch links within itself. The input `thread_id` is ignored.
 pub(crate) fn insert_synced(
     tx: &Transaction,
     folder_id: FolderId,
@@ -537,21 +538,9 @@ pub(crate) fn insert_synced(
         [folder_id],
         |r| r.get(0),
     )?;
-    let mut assigned = Vec::with_capacity(messages.len());
+    let subject_merge = crate::threads::subject_merge_on(tx)?;
+    let mut ids = Vec::with_capacity(messages.len());
     for mut m in messages {
-        let existing: Option<ThreadId> = match m.gm_thrid {
-            Some(thrid) => {
-                let mut stmt = tx.prepare_cached(
-                    "SELECT thread_id FROM messages WHERE account_id = ?1 AND gm_thrid = ?2 LIMIT 1",
-                )?;
-                let mut rows = stmt.query(params![account_id, thrid])?;
-                match rows.next()? {
-                    Some(row) => Some(row.get(0)?),
-                    None => None,
-                }
-            }
-            None => None,
-        };
         // Contacts come from the From, To and Cc of mail received (section 10).
         let people: Vec<(String, String)> = std::iter::once(&m.from)
             .chain(&m.to)
@@ -559,19 +548,15 @@ pub(crate) fn insert_synced(
             .map(|a| (a.addr.clone(), a.name.clone()))
             .collect();
         crate::outbox::bump_contacts(tx, account_id, &people, 1, m.date_utc)?;
-        m.thread_id = match existing {
-            Some(thread) => {
-                tx.execute(
-                    "UPDATE threads SET last_date_utc = max(last_date_utc, ?2) WHERE id = ?1",
-                    params![thread, m.date_utc],
-                )?;
-                thread
-            }
-            None => insert_thread(tx, account_id, m.date_utc, "")?,
-        };
-        assigned.push(m);
+        let links = crate::threads::link_ids(&m);
+        m.thread_id = crate::threads::assign(tx, account_id, &m, &links, subject_merge)?;
+        let id = insert_messages(tx, folder_id, std::slice::from_ref(&m))?;
+        for id in id {
+            crate::threads::record(tx, account_id, id, &links)?;
+            ids.push(id);
+        }
     }
-    insert_messages(tx, folder_id, &assigned)
+    Ok(ids)
 }
 
 /// Replaces the flags of cached messages by UID. Returns how many rows changed.
@@ -867,6 +852,218 @@ pub(crate) fn search_page(
     page(rows, limit)
 }
 
+/// `m.folder_id IN (...)` for ids from the store itself (integers, so formatting is safe).
+fn in_list(ids: &[FolderId]) -> String {
+    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+}
+
+/// Newest first across several folders (All Inboxes, section 11), strictly after the cursor.
+pub(crate) fn folders_page(
+    conn: &Connection,
+    folders: &[FolderId],
+    cursor: Option<Cursor>,
+    limit: u32,
+) -> Result<Page> {
+    if folders.is_empty() {
+        return Ok(Page {
+            rows: Vec::new(),
+            next: None,
+        });
+    }
+    let (date, id) = start(cursor);
+    let sql = format!(
+        concat!(
+            "SELECT ",
+            row_columns!(),
+            " FROM messages AS m
+              WHERE m.folder_id IN ({}) AND (m.flags & ?1) = 0 AND (m.date_utc, m.id) < (?2, ?3)
+              ORDER BY m.date_utc DESC, m.id DESC
+              LIMIT ?4"
+        ),
+        in_list(folders)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![HIDDEN, date, id, fetch_limit(limit)?], list_row)?;
+    page(rows, limit)
+}
+
+/// One row per thread among `folders`, newest first by the thread's latest message there
+/// (section 10, rule 5). The counts and participants cover the thread's messages outside
+/// `exclude` (Trash, Junk and Drafts unless one of them is being listed, rule 6), and a
+/// Gmail message under two labels counts once (section 9).
+pub(crate) fn threads_page(
+    conn: &Connection,
+    folders: &[FolderId],
+    exclude: &[FolderId],
+    cursor: Option<Cursor>,
+    limit: u32,
+) -> Result<ThreadPage> {
+    if folders.is_empty() {
+        return Ok(ThreadPage {
+            rows: Vec::new(),
+            next: None,
+        });
+    }
+    let (date, id) = start(cursor);
+    let sql = format!(
+        concat!(
+            "SELECT * FROM (SELECT ",
+            row_columns!(),
+            ", row_number() OVER (PARTITION BY m.thread_id ORDER BY m.date_utc DESC, m.id DESC) AS rn
+              FROM messages AS m WHERE m.folder_id IN ({}) AND (m.flags & ?1) = 0)
+              WHERE rn = 1 AND (date_utc, id) < (?2, ?3)
+              ORDER BY date_utc DESC, id DESC
+              LIMIT ?4"
+        ),
+        in_list(folders)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![HIDDEN, date, id, fetch_limit(limit)?], list_row)?;
+    let Page { rows, next } = page(rows, limit)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let summary = thread_summary(conn, row.thread_id, exclude)?;
+        out.push(ThreadRow {
+            row,
+            messages: summary.0,
+            unread: summary.1,
+            participants: summary.2,
+        });
+    }
+    Ok(ThreadPage { rows: out, next })
+}
+
+/// Message count, unread count and up to 3 participant names of a thread.
+fn thread_summary(
+    conn: &Connection,
+    thread: ThreadId,
+    exclude: &[FolderId],
+) -> Result<(u32, u32, Vec<String>)> {
+    let not_in = if exclude.is_empty() {
+        String::new()
+    } else {
+        format!(" AND folder_id NOT IN ({})", in_list(exclude))
+    };
+    let (messages, unread): (u32, u32) = conn
+        .prepare_cached(&format!(
+            "SELECT count(DISTINCT coalesce(gm_msgid, -id)),
+                    count(DISTINCT CASE WHEN (flags & 1) = 0 THEN coalesce(gm_msgid, -id) END)
+             FROM messages WHERE thread_id = ?1 AND (flags & ?2) = 0{not_in}"
+        ))?
+        .query_row(params![thread, HIDDEN], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT from_name, from_addr FROM messages
+         WHERE thread_id = ?1 AND (flags & ?2) = 0{not_in} ORDER BY date_utc, id"
+    ))?;
+    let senders = stmt.query_map(params![thread, HIDDEN], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut names: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for s in senders {
+        let (name, addr) = s?;
+        let key = addr.to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if names.len() < 3 {
+            names.push(if name.is_empty() { addr } else { name });
+        }
+    }
+    Ok((messages, unread, names))
+}
+
+/// A thread's messages outside `exclude`, oldest first (section 10, rule 6). A Gmail message
+/// under two labels is listed once, preferring its row in `prefer` (the open folder).
+pub(crate) fn thread_messages(
+    conn: &Connection,
+    thread: ThreadId,
+    exclude: &[FolderId],
+    prefer: Option<FolderId>,
+) -> Result<Vec<ListRow>> {
+    let not_in = if exclude.is_empty() {
+        String::new()
+    } else {
+        format!(" AND m.folder_id NOT IN ({})", in_list(exclude))
+    };
+    let sql = format!(
+        concat!(
+            "SELECT ",
+            row_columns!(),
+            ", m.gm_msgid FROM messages AS m
+              WHERE m.thread_id = ?1 AND (m.flags & ?2) = 0{}
+              ORDER BY m.date_utc, m.id"
+        ),
+        not_in
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![thread, HIDDEN], |r| {
+        Ok((list_row(r)?, r.get::<_, Option<i64>>(12)?))
+    })?;
+    let mut out: Vec<(ListRow, Option<i64>)> = Vec::new();
+    for row in rows {
+        let ((mut row, to_json), gm) = row?;
+        row.to = serde_json::from_str(&to_json)?;
+        match gm.and_then(|g| out.iter().position(|(_, o)| *o == Some(g))) {
+            Some(i) => {
+                if Some(row.folder_id) == prefer {
+                    out[i] = (row, gm);
+                }
+            }
+            None => out.push((row, gm)),
+        }
+    }
+    Ok(out.into_iter().map(|(r, _)| r).collect())
+}
+
+/// Newest first among messages matching a clause the `search` module built (section 10),
+/// strictly after the cursor. The clause uses `?` placeholders bound to `q.params` in order.
+/// A Gmail message under two labels is listed once (section 9).
+pub(crate) fn query_page(
+    conn: &Connection,
+    q: &SearchSql,
+    cursor: Option<Cursor>,
+    limit: u32,
+) -> Result<Page> {
+    let (date, id) = start(cursor);
+    let sql = format!(
+        concat!(
+            "SELECT ",
+            row_columns!(),
+            " FROM messages AS m
+              WHERE (m.flags & {hidden}) = 0 AND ({clause})
+                AND (m.gm_msgid IS NULL OR m.id = (SELECT min(g.id) FROM messages AS g
+                     WHERE g.account_id = m.account_id AND g.gm_msgid = m.gm_msgid
+                       AND (g.flags & {hidden}) = 0 AND ({clause_g})))
+                AND (m.date_utc, m.id) < (?, ?)
+              ORDER BY m.date_utc DESC, m.id DESC
+              LIMIT ?"
+        ),
+        hidden = HIDDEN,
+        clause = q.clause,
+        clause_g = q.clause.replace("m.", "g."),
+    );
+    let mut values: Vec<rusqlite::types::Value> = q.params.iter().map(SqlParam::value).collect();
+    values.extend(q.params.iter().map(SqlParam::value));
+    values.push(date.into());
+    values.push(id.into());
+    values.push(fetch_limit(limit)?.into());
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values), list_row)?;
+    page(rows, limit)
+}
+
+/// How many visible messages match a clause the `search` module built.
+pub(crate) fn query_count(conn: &Connection, q: &SearchSql) -> Result<u32> {
+    let sql = format!(
+        "SELECT count(*) FROM messages AS m WHERE (m.flags & {HIDDEN}) = 0 AND ({})",
+        q.clause
+    );
+    let values: Vec<rusqlite::types::Value> = q.params.iter().map(SqlParam::value).collect();
+    Ok(conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?)
+}
+
 fn start(cursor: Option<Cursor>) -> (i64, i64) {
     cursor.map_or((i64::MAX, i64::MAX), |c| (c.date_utc, c.id))
 }
@@ -924,6 +1121,24 @@ fn list_row(r: &Row) -> rusqlite::Result<(ListRow, String)> {
         },
         r.get(7)?,
     ))
+}
+
+/// Sets where a folder's sync window starts (SPEC_GAPS G75). With `only_back`, the start
+/// only moves earlier (Load older); a first sync sets it outright.
+pub(crate) fn set_window_start(
+    tx: &Transaction,
+    folder_id: FolderId,
+    start: i64,
+    only_back: bool,
+) -> Result<()> {
+    let sql = if only_back {
+        "UPDATE folders SET window_start = ?2
+         WHERE id = ?1 AND (window_start = 0 OR ?2 < window_start)"
+    } else {
+        "UPDATE folders SET window_start = ?2 WHERE id = ?1"
+    };
+    tx.execute(sql, params![folder_id, start])?;
+    Ok(())
 }
 
 #[cfg(test)]

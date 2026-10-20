@@ -14,18 +14,24 @@ use crate::error::{Result, StoreError};
 use rusqlite::{Connection, TransactionBehavior};
 
 /// Every migration, in order. Never edit a released entry; append a new one.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
-/// Applies every migration the database has not seen yet.
-pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
-    migrate_with(conn, MIGRATIONS)
+/// Applies every migration the database has not seen yet. Returns the version the database
+/// had before, so data steps that SQL alone cannot do run once (threading, M9).
+pub(crate) fn migrate(conn: &mut Connection) -> Result<i64> {
+    let before = user_version(conn)?;
+    migrate_with(conn, MIGRATIONS)?;
+    Ok(before)
 }
+
+/// The version that added `message_refs`; databases from before it are threaded again once.
+pub(crate) const THREADING_VERSION: i64 = 3;
 
 pub(crate) fn user_version(conn: &Connection) -> Result<i64> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
-fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
+pub(crate) fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
     let supported =
         i64::try_from(migrations.len()).map_err(|_| StoreError::Invalid("migrations"))?;
     let found = user_version(conn)?;
@@ -41,6 +47,26 @@ fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+
+/// Version 3 (M9): threading by References (SPEC_GAPS G74), the sync window start (G75) and
+/// List-Id for rules (G76). Existing windows start at their oldest cached message, as Load
+/// older measured them before (G62); `message_refs` is filled by the store after migrating.
+const V3: &str = "
+ALTER TABLE folders ADD COLUMN window_start INTEGER NOT NULL DEFAULT 0;
+UPDATE folders SET window_start =
+    coalesce((SELECT min(internal_utc) FROM messages WHERE folder_id = folders.id), 0);
+ALTER TABLE messages ADD COLUMN list_id TEXT;
+CREATE TABLE message_refs (
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    ref        TEXT    NOT NULL,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, ref)
+) STRICT;
+CREATE INDEX message_refs_ref ON message_refs(account_id, ref);
+CREATE INDEX threads_subject ON threads(account_id, subject_norm);
+CREATE INDEX messages_account_gmmsgid ON messages(account_id, gm_msgid) WHERE gm_msgid IS NOT NULL;
+CREATE INDEX messages_account_date ON messages(account_id, date_utc DESC, id DESC);
+";
 
 /// Version 2: Gmail messages join their account's thread by `X-GM-THRID` (SPEC_GAPS G36).
 const V2: &str = "CREATE INDEX messages_account_thrid ON messages(account_id, gm_thrid)

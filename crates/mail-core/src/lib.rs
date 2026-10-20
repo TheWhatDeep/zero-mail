@@ -9,8 +9,10 @@ pub mod accounts;
 pub mod compose;
 mod core;
 mod error;
+mod lists;
 pub mod logging;
 mod mailbox;
+pub mod search;
 pub mod views;
 
 pub use crate::core::{

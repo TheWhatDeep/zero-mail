@@ -337,6 +337,9 @@ pub struct Folder {
     pub total: u32,
     /// 0 until a full folder sync has completed once.
     pub synced_at: i64,
+    /// Where the sync window starts (UTC); 0 until the first sync. Stored messages older
+    /// than it are outside the window (SPEC_GAPS G75).
+    pub window_start: i64,
 }
 
 /// The server state a completed folder sync records (section 6, step 7).
@@ -488,6 +491,8 @@ pub struct NewMessage {
     pub in_reply_to: Option<String>,
     pub refs: Option<String>,
     pub gm_labels: Option<Vec<String>>,
+    /// The List-Id header, for rules (SPEC_GAPS G76).
+    pub list_id: Option<String>,
     pub thread_id: ThreadId,
     pub subject: String,
     pub from: Address,
@@ -562,4 +567,45 @@ pub struct ListRow {
 pub struct Page {
     pub rows: Vec<ListRow>,
     pub next: Option<Cursor>,
+}
+
+/// One thread in a list (section 10, rule 5): its latest message in the listed folders, how
+/// many messages and unread messages it has, and up to 3 participant names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadRow {
+    pub row: ListRow,
+    pub messages: u32,
+    pub unread: u32,
+    pub participants: Vec<String>,
+}
+
+/// A page of threads; the cursor is the `(date, id)` of the last thread's row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadPage {
+    pub rows: Vec<ThreadRow>,
+    pub next: Option<Cursor>,
+}
+
+/// A search clause over `messages AS m`, with `?` placeholders (section 10). The `search`
+/// module builds it; the store runs it read-only.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SearchSql {
+    pub clause: String,
+    pub params: Vec<SqlParam>,
+}
+
+/// One bound value of a [`SearchSql`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlParam {
+    Int(i64),
+    Text(String),
+}
+
+impl SqlParam {
+    pub(crate) fn value(&self) -> rusqlite::types::Value {
+        match self {
+            Self::Int(i) => rusqlite::types::Value::Integer(*i),
+            Self::Text(t) => rusqlite::types::Value::Text(t.clone()),
+        }
+    }
 }
