@@ -2,7 +2,16 @@
 // state, each account's folder list, the selected folder and message, and banners. Message
 // rows are not here: the list keeps only its visible window (section 14).
 
-import { commands, on, toAppError, type AccountView, type AppError, type FolderView } from "../lib/ipc";
+import {
+  commands,
+  on,
+  toAppError,
+  type AccountView,
+  type AppError,
+  type FolderView,
+  type OutboxStateName,
+  type OutboxView,
+} from "../lib/ipc";
 import { errorText, opKindText, strings } from "../strings";
 
 export type FormMode = { mode: "add" } | { mode: "edit"; account: AccountView };
@@ -12,6 +21,18 @@ export interface Notice {
   text: string;
   /** The op the Undo button reverses (section 9: archive, delete and move). */
   undo?: number;
+  /** The outbox item the Undo button takes back (section 7: undo send). */
+  undoSend?: number;
+}
+
+/** Outbox items that need the user: the sidebar badge counts these (section 11, States). */
+export function needsAction(items: OutboxView[]): number {
+  return items.filter((o) => o.state === "failed" || o.state === "unknown").length;
+}
+
+/** The Outbox view lists what has not gone yet; sent rows are history. */
+export function unsent(items: OutboxView[]): OutboxView[] {
+  return items.filter((o) => o.state !== "sent");
 }
 
 /** A folder reset toast lasts as long as the spec's other toasts (section 9: 10 s). */
@@ -38,6 +59,10 @@ class AppState {
   hoveredLink = $state<string | null>(null);
   /** Unfinished ops and outbox items (pending-count). */
   pending = $state(0);
+  /** Each account's outbox (SPEC_GAPS G69), kept current by outbox-state. */
+  outbox = $state<Record<number, OutboxView[]>>({});
+  /** The account whose Outbox view is open instead of a folder. */
+  outboxAccount = $state<number | null>(null);
 
   private unlisten: (() => void)[] = [];
   private nextToast = 1;
@@ -72,6 +97,7 @@ class AppState {
       on("op-failed", (p) => {
         this.toast(strings.opFailed(opKindText[p.kind], errorText[p.error.code]));
       }),
+      on("outbox-state", (p) => void this.onOutboxState(p.account_id, p.outbox_id, p.state)),
     ]);
     this.unlisten = offs;
     if (typeof window !== "undefined") {
@@ -102,6 +128,7 @@ class AppState {
     for (const a of accounts) {
       if (a.state === "backoff") this.backoffSince[a.id] ??= Date.now();
       await this.reloadFolders(a.id);
+      await this.reloadOutbox(a.id);
     }
     if (!this.selected || !accounts.some((a) => a.id === this.selected?.account_id)) {
       this.selectFirstInbox();
@@ -128,7 +155,21 @@ class AppState {
     this.selected = null;
   }
 
+  async reloadOutbox(accountId: number): Promise<void> {
+    try {
+      this.outbox[accountId] = await commands["outbox.list"](accountId);
+    } catch {
+      this.outbox[accountId] = [];
+    }
+  }
+
+  openOutbox(accountId: number): void {
+    this.outboxAccount = accountId;
+    this.message = null;
+  }
+
   selectFolder(accountId: number, folderId: number): void {
+    this.outboxAccount = null;
     if (this.selected?.account_id === accountId && this.selected.folder_id === folderId) return;
     this.selected = { account_id: accountId, folder_id: folderId };
     this.message = null;
@@ -157,10 +198,40 @@ class AppState {
     if (state === "idle" || state === "syncing") void this.reloadFolders(accountId);
   }
 
+  private async onOutboxState(
+    accountId: number,
+    outboxId: number,
+    state: OutboxStateName | "undone" | "discarded",
+  ): Promise<void> {
+    await this.reloadOutbox(accountId);
+    const subject = this.outbox[accountId]?.find((o) => o.id === outboxId)?.subject || strings.noSubject;
+    if (state === "queued") this.notify({ text: strings.sendingToast, undoSend: outboxId });
+    else if (state === "failed") this.toast(strings.sendFailedToast(subject));
+    else if (state === "unknown") this.toast(strings.sendUnknownToast(subject));
+    else if (state === "sending" || state === "sent" || state === "undone" || state === "discarded") {
+      // The send went ahead or was taken back: its Undo no longer applies.
+      this.toasts = this.toasts.filter((t) => t.undoSend !== outboxId);
+    }
+  }
+
   toast(text: string, undo?: number): void {
+    this.notify(undo === undefined ? { text } : { text, undo });
+  }
+
+  private notify(notice: Omit<Notice, "id">): void {
     const id = this.nextToast++;
-    this.toasts.push(undo === undefined ? { id, text } : { id, text, undo });
+    this.toasts.push({ id, ...notice });
     setTimeout(() => this.dismissToast(id), TOAST_MS);
+  }
+
+  /** Undo send (section 7): the item leaves the outbox and its draft reopens. */
+  async undoSend(toastId: number, outboxId: number): Promise<void> {
+    this.dismissToast(toastId);
+    try {
+      await commands["outbox.undo"](outboxId);
+    } catch (err) {
+      this.toast(errorText[toAppError(err).code]);
+    }
   }
 
   /** Undo from a toast: the op is cancelled or reversed (section 9). */

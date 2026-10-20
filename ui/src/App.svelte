@@ -5,6 +5,7 @@
   import AccountForm from "./components/AccountForm.svelte";
   import Banners from "./components/Banners.svelte";
   import MessageList from "./components/MessageList.svelte";
+  import Outbox from "./components/Outbox.svelte";
   import ReadingPane from "./components/ReadingPane.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import StatusBar from "./components/StatusBar.svelte";
@@ -32,6 +33,9 @@
       <Banners />
       {#if app.form}
         <AccountForm account={app.form.mode === "edit" ? app.form.account : null} cancellable={true} />
+      {:else if app.outboxAccount !== null}
+        <h1 class="title">{strings.outbox}</h1>
+        <Outbox accountId={app.outboxAccount} />
       {:else}
         <h1 class="title">{folder?.name ?? ""}</h1>
         <div class="panes">

@@ -12,3 +12,9 @@ workspace = true
 mail-smtp.workspace = true
 mail-imap.workspace = true
 mail-store.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+mail-smtp = { workspace = true, features = ["fake"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

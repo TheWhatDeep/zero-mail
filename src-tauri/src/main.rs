@@ -15,18 +15,22 @@
 //! and `log.open` hand a checked URL or path to the OS, and Save as opens the native dialog
 //! when the page passes no path (SPEC_GAPS G52, G54). The page has no plugin permission.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use mail_core::views::{FlagChange, FolderView, ListRequest, MessageView, PageView, Role};
+use mail_core::compose::{DraftContent, DraftView, IdentityView, OutboxView};
+use mail_core::views::{
+    AddressView, FlagChange, FolderView, ListRequest, MessageView, PageView, Role,
+};
 use mail_core::{
     AccountConfig, AccountSummary, AccountView, AppError, Candidate, Core, CoreConfig, CoreEvent,
     ErrorCode, EventSink, HttpClient, ImapClient, Keychain, SmtpClient, TestReport,
 };
 use tauri::http::{header, Response, StatusCode};
 use tauri::ipc::CapabilityBuilder;
-use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Listener, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -34,6 +38,59 @@ type AppCore = Core<ImapClient, SmtpClient, HttpClient>;
 
 /// The core, shared by commands and the protocol handler.
 struct CoreState(Arc<AppCore>);
+
+/// Compose windows asked to close that wait for their page's last `draft.save`, so the
+/// typing of the last 5 s is not lost (section 7, Drafts).
+#[derive(Default)]
+struct Closing(Mutex<HashSet<i64>>);
+
+/// How long a closing compose window waits for its page to save.
+const CLOSE_FLUSH: Duration = Duration::from_secs(3);
+
+/// Run in a closing compose window: save now (Compose.svelte sets the hook).
+const FLUSH_SCRIPT: &str = "window.__ZEROMAIL_FLUSH__ && window.__ZEROMAIL_FLUSH__();";
+
+/// Takes a draft out of the closing set; true if it was there.
+fn take_closing(app: &AppHandle, draft_id: i64) -> bool {
+    app.try_state::<Closing>()
+        .and_then(|c| c.0.lock().ok().map(|mut set| set.remove(&draft_id)))
+        .unwrap_or(false)
+}
+
+/// Closes a compose window for good (no second flush).
+fn destroy_compose(app: &AppHandle, draft_id: i64) {
+    if let Some(w) = app.get_webview_window(&format!("compose-{draft_id}")) {
+        let _ = w.destroy();
+    }
+}
+
+/// A compose window's close button: ask the page to save, close once it has (or after
+/// [`CLOSE_FLUSH`]).
+fn close_requested(window: &tauri::Window, draft_id: i64, api: &tauri::CloseRequestApi) {
+    let app = window.app_handle().clone();
+    let fresh = app
+        .try_state::<Closing>()
+        .and_then(|c| c.0.lock().ok().map(|mut set| set.insert(draft_id)))
+        .unwrap_or(false);
+    if !fresh {
+        return;
+    }
+    let Some(webview) = app.get_webview_window(window.label()) else {
+        take_closing(&app, draft_id);
+        return;
+    };
+    if webview.eval(FLUSH_SCRIPT).is_err() {
+        take_closing(&app, draft_id);
+        return;
+    }
+    api.prevent_close();
+    std::thread::spawn(move || {
+        std::thread::sleep(CLOSE_FLUSH);
+        if take_closing(&app, draft_id) {
+            destroy_compose(&app, draft_id);
+        }
+    });
+}
 
 /// Set by the perf harness: where to write the result.
 const PERF_OUT_ENV: &str = "ZEROMAIL_PERF_OUT";
@@ -346,6 +403,222 @@ async fn folder_extend_window(
     core.0.folder_extend_window(account_id, folder_id).await
 }
 
+/// Opens (or focuses) a draft's compose window (section 11; SPEC_GAPS G63). The draft
+/// reaches the page through a start-up script, so the page needs no command to fetch it.
+fn open_compose(app: &AppHandle, view: &DraftView) -> Result<(), AppError> {
+    let label = format!("compose-{}", view.draft_id);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        &label,
+        WebviewUrl::App(format!("index.html#compose/{}", view.draft_id).into()),
+    )
+    .title("Zero Mail")
+    .inner_size(760.0, 680.0)
+    .min_inner_size(560.0, 420.0)
+    .initialization_script(format!("window.__ZEROMAIL_DRAFT__ = {};", view.to_json()))
+    .build()
+    .map(|_| ())
+    .map_err(os_error)
+}
+
+/// The draft a compose window belongs to.
+fn compose_draft(label: &str) -> Option<i64> {
+    label.strip_prefix("compose-")?.parse().ok()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn compose_new(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    to: Option<String>,
+) -> Result<DraftView, AppError> {
+    let view = core.0.compose_new(account_id, to).await?;
+    open_compose(&app, &view)?;
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn compose_reply(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+) -> Result<DraftView, AppError> {
+    let view = core.0.compose_reply(message_id, false).await?;
+    open_compose(&app, &view)?;
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn compose_reply_all(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+) -> Result<DraftView, AppError> {
+    let view = core.0.compose_reply(message_id, true).await?;
+    open_compose(&app, &view)?;
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn compose_forward(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+    as_attachment: bool,
+) -> Result<DraftView, AppError> {
+    let view = core.0.compose_forward(message_id, as_attachment).await?;
+    open_compose(&app, &view)?;
+    Ok(view)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_save(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+    content: DraftContent,
+) -> Result<(), AppError> {
+    let saved = core.0.draft_save(draft_id, content).await;
+    if take_closing(&app, draft_id) {
+        destroy_compose(&app, draft_id);
+    }
+    saved
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_discard(
+    window: tauri::WebviewWindow,
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+) -> Result<(), AppError> {
+    core.0.draft_discard(draft_id).await?;
+    if compose_draft(window.label()) == Some(draft_id) {
+        let _ = window.destroy();
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_add_attachment(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+    path: Option<String>,
+) -> Result<DraftContent, AppError> {
+    let path = match path {
+        Some(p) => PathBuf::from(p),
+        // The native Open dialog from Rust (as for Save, SPEC_GAPS G54).
+        None => {
+            let app = app.clone();
+            let chosen = tauri::async_runtime::spawn_blocking(move || {
+                app.dialog().file().blocking_pick_file()
+            })
+            .await
+            .map_err(os_error)?;
+            match chosen {
+                Some(p) => p.into_path().map_err(os_error)?,
+                None => return Err(AppError::new(ErrorCode::Cancelled, "no file chosen")),
+            }
+        }
+    };
+    core.0.draft_add_attachment(draft_id, path).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_remove_attachment(
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+    attachment_id: String,
+) -> Result<DraftContent, AppError> {
+    core.0
+        .draft_remove_attachment(draft_id, &attachment_id)
+        .await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn draft_send(
+    window: tauri::WebviewWindow,
+    core: tauri::State<'_, CoreState>,
+    draft_id: i64,
+    identity_id: i64,
+    send_at: Option<i64>,
+) -> Result<i64, AppError> {
+    let id = core.0.draft_send(draft_id, identity_id, send_at).await?;
+    if compose_draft(window.label()) == Some(draft_id) {
+        let _ = window.destroy();
+    }
+    Ok(id)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn outbox_undo(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    outbox_id: i64,
+) -> Result<(), AppError> {
+    if let Some(draft_id) = core.0.outbox_undo(outbox_id).await? {
+        let view = core.0.draft_view(draft_id).await?;
+        open_compose(&app, &view)?;
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn outbox_retry(core: tauri::State<'_, CoreState>, outbox_id: i64) -> Result<(), AppError> {
+    core.0.outbox_retry(outbox_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn outbox_discard(core: tauri::State<'_, CoreState>, outbox_id: i64) -> Result<(), AppError> {
+    core.0.outbox_discard(outbox_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn outbox_list(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+) -> Result<Vec<OutboxView>, AppError> {
+    core.0.outbox_list(account_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn identity_list(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+) -> Result<Vec<IdentityView>, AppError> {
+    core.0.identity_list(account_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn identity_save(
+    core: tauri::State<'_, CoreState>,
+    identity: IdentityView,
+) -> Result<Vec<IdentityView>, AppError> {
+    core.0.identity_save(identity).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn identity_delete(
+    core: tauri::State<'_, CoreState>,
+    identity_id: i64,
+) -> Result<Vec<IdentityView>, AppError> {
+    core.0.identity_delete(identity_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn contacts_suggest(
+    core: tauri::State<'_, CoreState>,
+    prefix: String,
+    account_id: i64,
+) -> Result<Vec<AddressView>, AppError> {
+    core.0.contacts_suggest(&prefix, account_id).await
+}
+
 /// `mail-body://localhost/<message>?images=0|1&plain=0|1` (section 8, step 3; SPEC_GAPS
 /// G53): the message id and the query. The CSP is a response header, never a meta tag.
 fn mail_body_request(uri: &tauri::http::Uri) -> Option<(i64, String)> {
@@ -455,6 +728,7 @@ fn main() {
                 sink,
             ))?;
             app.manage(CoreState(core));
+            app.manage(Closing::default());
             perf_hooks(app, started)?;
             Ok(())
         })
@@ -523,7 +797,43 @@ fn main() {
             folder_set_sync,
             folder_set_watch,
             folder_extend_window,
+            compose_new,
+            compose_reply,
+            compose_reply_all,
+            compose_forward,
+            draft_save,
+            draft_discard,
+            draft_add_attachment,
+            draft_remove_attachment,
+            draft_send,
+            outbox_undo,
+            outbox_retry,
+            outbox_discard,
+            outbox_list,
+            identity_list,
+            identity_save,
+            identity_delete,
+            contacts_suggest,
         ])
+        // A compose window that closes uploads its draft now (section 7, Drafts).
+        .on_window_event(|window, event| {
+            if let (tauri::WindowEvent::CloseRequested { api, .. }, Some(draft_id)) =
+                (event, compose_draft(window.label()))
+            {
+                close_requested(window, draft_id, api);
+            }
+            if let (tauri::WindowEvent::Destroyed, Some(draft_id)) =
+                (event, compose_draft(window.label()))
+            {
+                take_closing(window.app_handle(), draft_id);
+                if let Some(core) = window.app_handle().try_state::<CoreState>() {
+                    let core = Arc::clone(&core.0);
+                    tauri::async_runtime::spawn(async move {
+                        let _ = core.draft_close(draft_id).await;
+                    });
+                }
+            }
+        })
         .build(tauri::generate_context!());
 
     let app = match built {

@@ -1,7 +1,7 @@
 // Every user-visible string lives here (BUILD.md section 11, Accessibility: English only,
 // all strings in one file). Components import from this module and never inline text.
 
-import type { AccountState, ErrorCode, OpKind, Role } from "./lib/ipc";
+import type { AccountState, ErrorCode, OpKind, OutboxStateName, Role } from "./lib/ipc";
 
 export const strings = {
   appName: "Zero Mail",
@@ -156,7 +156,76 @@ export const strings = {
   pinned: "Certificate trusted for this account",
   oauthLater: "Google sign-in arrives in a later version; use an app password for now.",
   fieldInvalid: "Check this field",
+
+  // Compose (section 11, Compose; section 7)
+  compose: "Compose",
+  reply: "Reply",
+  replyAll: "Reply all",
+  forward: "Forward",
+  forwardAsAttachment: "Forward as attachment",
+  composeFrom: "From",
+  bcc: "Bcc",
+  subject: "Subject",
+  removeRecipient: (addr: string) => `Remove ${addr}`,
+  formatting: "Formatting",
+  bold: "Bold",
+  italic: "Italic",
+  underline: "Underline",
+  bulletList: "Bulleted list",
+  numberedList: "Numbered list",
+  link: "Link",
+  plainTextOnly: "Plain text only",
+  messageBody: "Message",
+  attach: "Attach",
+  removeAttachment: (name: string) => `Remove ${name}`,
+  forwardedMessage: "Forwarded message (.eml)",
+  send: "Send",
+  sendAnyway: "Send anyway",
+  discard: "Discard",
+  invalidRecipients: "Fix the addresses in red before sending.",
+  addRecipient: "Add at least one recipient.",
+  emptySubjectWarning: "This message has no subject.",
+  missingAttachmentWarning: "The message mentions an attachment, but nothing is attached.",
+  quoteWrote: (date: string, name: string, addr: string) => (name ? `On ${date}, ${name} <${addr}> wrote:` : `On ${date}, ${addr} wrote:`),
+  forwardedHeader: "---------- Forwarded message ----------",
+  forwardFrom: "From:",
+  forwardDate: "Date:",
+  forwardSubject: "Subject:",
+  forwardTo: "To:",
+
+  // Outbox (section 7; section 11, States; SPEC_GAPS G69)
+  outbox: "Outbox",
+  outboxEmpty: "Nothing waiting to be sent",
+  sendingToast: "Sending.",
+
+  sendFailedToast: (subject: string) => `Could not send “${subject}”. It is in the Outbox.`,
+  sendUnknownToast: (subject: string) => `“${subject}” may not have been sent. Check Sent, then retry or discard it.`,
+  checkSent: "Check Sent, then retry or discard it.",
+  retry: "Retry",
+  edit: "Edit",
+  needsAction: (n: number) => (n === 1 ? "1 message needs attention" : `${n.toLocaleString("en")} messages need attention`),
+  scheduledFor: (when: string) => `Sends ${when}`,
+
+  // Identities (section 6; SPEC_GAPS G64)
+  identities: "Identities",
+  identityName: "Display name",
+  identityAddress: "Address",
+  identityReplyTo: "Reply-To (optional)",
+  makeDefault: "Make default",
+  isDefault: "Default",
+  addIdentity: "Add identity",
+  removeIdentity: (addr: string) => `Remove ${addr}`,
 } as const;
+
+/** Outbox states in words (Outbox view). */
+export const outboxStateText: Record<OutboxStateName, string> = {
+  queued: "Waiting to send",
+  sending: "Sending",
+  retry_wait: "Will retry",
+  sent: "Sent",
+  failed: "Not sent",
+  unknown: "May not have been sent",
+};
 
 /** What a failed op was doing, for the op-failed toast (SPEC_GAPS G58). */
 export const opKindText: Record<OpKind, string> = {
@@ -166,6 +235,9 @@ export const opKindText: Record<OpKind, string> = {
   folder_create: "create the folder",
   folder_rename: "rename the folder",
   folder_delete: "delete the folder",
+  append: "save a copy to Sent",
+  draft_replace: "save the draft to the server",
+  draft_delete: "remove the draft from the server",
 };
 
 /** Folder roles in words (folder settings). */

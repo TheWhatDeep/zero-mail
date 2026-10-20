@@ -6,6 +6,7 @@
 //! - [`Core`]: the commands, actors and events the app wires up, M4.
 
 pub mod accounts;
+pub mod compose;
 mod core;
 mod error;
 pub mod logging;

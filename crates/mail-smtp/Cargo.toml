@@ -14,11 +14,12 @@ workspace = true
 fake = []
 
 [dependencies]
-lettre = { workspace = true, features = ["tokio1", "smtp-transport"] }
+lettre = { workspace = true, features = ["tokio1", "smtp-transport", "builder"] }
 rustls.workspace = true
 rustls-platform-verifier.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 tokio = { workspace = true, features = ["net", "io-util", "time", "sync"] }
 tokio-rustls.workspace = true
 tracing.workspace = true

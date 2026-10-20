@@ -202,8 +202,88 @@ export interface FlagChange {
   flagged?: boolean;
 }
 
+export interface DraftAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+/** What the composer quotes; it formats the date in local time (section 7). */
+export interface Quote {
+  date_utc: number;
+  from: Address;
+  to: Address[];
+  subject: string;
+  text: string;
+  forwarded: boolean;
+}
+
+/** A draft's content (drafts.content_json). */
+export interface DraftContent {
+  identity_id: number | null;
+  to: Address[];
+  cc: Address[];
+  bcc: Address[];
+  subject: string;
+  html: string;
+  text: string;
+  plain_only: boolean;
+  attachments: DraftAttachment[];
+  forward_attachment: number | null;
+  in_reply_to: string | null;
+  references: string[];
+  original: number | null;
+  mode: "new" | "reply" | "reply_all" | "forward" | string;
+  quote: Quote | null;
+  message_id: string;
+}
+
+export interface IdentityView {
+  id: number | null;
+  account_id: number;
+  name: string;
+  address: string;
+  reply_to: string | null;
+  is_default: boolean;
+}
+
+/** What a compose window opens with (SPEC_GAPS G63). */
+export interface DraftView {
+  draft_id: number;
+  account_id: number;
+  content: DraftContent;
+  identities: IdentityView[];
+  signature_html: string;
+  signature_text: string;
+}
+
+export type OutboxStateName = "queued" | "sending" | "retry_wait" | "sent" | "failed" | "unknown";
+
+/** One outbox.list row (SPEC_GAPS G69). */
+export interface OutboxView {
+  id: number;
+  account_id: number;
+  subject: string;
+  to: string[];
+  state: OutboxStateName;
+  error: { code: ErrorCode; message: string; addresses?: string[] } | null;
+  send_after_utc: number;
+  created_at: number;
+  draft_id: number | null;
+}
+
 /** pending_ops kinds, as op-failed reports them. */
-export type OpKind = "flags" | "move" | "expunge" | "folder_create" | "folder_rename" | "folder_delete";
+export type OpKind =
+  | "flags"
+  | "move"
+  | "expunge"
+  | "folder_create"
+  | "folder_rename"
+  | "folder_delete"
+  | "append"
+  | "draft_replace"
+  | "draft_delete";
 
 const ERROR_CODES: readonly ErrorCode[] = [
   "network",
@@ -292,6 +372,30 @@ export const commands = {
     call<null>("folder_set_watch", { account_id, path, value }),
   "folder.extend_window": (account_id: number, folder_id: number) =>
     call<null>("folder_extend_window", { account_id, folder_id }),
+  /** Opens the compose window (SPEC_GAPS G63). */
+  "compose.new": (account_id: number, to: string | null = null) => call<DraftView>("compose_new", { account_id, to }),
+  "compose.reply": (message_id: number) => call<DraftView>("compose_reply", { message_id }),
+  "compose.reply_all": (message_id: number) => call<DraftView>("compose_reply_all", { message_id }),
+  "compose.forward": (message_id: number, as_attachment: boolean) =>
+    call<DraftView>("compose_forward", { message_id, as_attachment }),
+  "draft.save": (draft_id: number, content: DraftContent) => call<null>("draft_save", { draft_id, content }),
+  "draft.discard": (draft_id: number) => call<null>("draft_discard", { draft_id }),
+  /** With no path the app shows the native Open dialog. */
+  "draft.add_attachment": (draft_id: number, path: string | null = null) =>
+    call<DraftContent>("draft_add_attachment", { draft_id, path }),
+  "draft.remove_attachment": (draft_id: number, attachment_id: string) =>
+    call<DraftContent>("draft_remove_attachment", { draft_id, attachment_id }),
+  "draft.send": (draft_id: number, identity_id: number, send_at: number | null = null) =>
+    call<number>("draft_send", { draft_id, identity_id, send_at }),
+  "outbox.undo": (outbox_id: number) => call<null>("outbox_undo", { outbox_id }),
+  "outbox.retry": (outbox_id: number) => call<null>("outbox_retry", { outbox_id }),
+  "outbox.discard": (outbox_id: number) => call<null>("outbox_discard", { outbox_id }),
+  "outbox.list": (account_id: number) => call<OutboxView[]>("outbox_list", { account_id }),
+  "identity.list": (account_id: number) => call<IdentityView[]>("identity_list", { account_id }),
+  "identity.save": (identity: IdentityView) => call<IdentityView[]>("identity_save", { identity }),
+  "identity.delete": (identity_id: number) => call<IdentityView[]>("identity_delete", { identity_id }),
+  "contacts.suggest": (prefix: string, account_id: number) =>
+    call<Address[]>("contacts_suggest", { prefix, account_id }),
 } as const;
 
 /** Event payloads (section 3, event table). */
@@ -303,6 +407,11 @@ export interface EventMap {
   "storage-warning": { kind: "disk_full" | "db_corrupt" };
   "pending-count": { total: number };
   "op-failed": { account_id: number; op_id: number; kind: OpKind; error: AppError };
+  "outbox-state": {
+    outbox_id: number;
+    account_id: number;
+    state: OutboxStateName | "undone" | "discarded";
+  };
 }
 
 export function on<K extends keyof EventMap>(name: K, handler: (payload: EventMap[K]) => void): Promise<UnlistenFn> {

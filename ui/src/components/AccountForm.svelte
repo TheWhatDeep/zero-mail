@@ -6,6 +6,7 @@
   // Certificates). Edit mode is the same form; it is how the user signs in again.
   import { untrack } from "svelte";
   import FolderSettings from "./FolderSettings.svelte";
+  import Identities from "./Identities.svelte";
   import { pop } from "../lib/motion";
   import {
     certificateToPin,
@@ -287,6 +288,7 @@
     {/if}
   </form>
   {#if initial}
+    <Identities accountId={initial.id} />
     <FolderSettings accountId={initial.id} />
   {/if}
 </div>

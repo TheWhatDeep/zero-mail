@@ -70,6 +70,12 @@ pub struct AccountConfig {
     /// Save even if Test connection fails (section 5, step 4).
     #[serde(default)]
     pub save_anyway: bool,
+    /// The account's signature (section 11, Identities and signatures; SPEC_GAPS G64).
+    /// `None` keeps the saved one.
+    #[serde(default)]
+    pub signature_html: Option<String>,
+    #[serde(default)]
+    pub signature_text: Option<String>,
 }
 
 fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Secret>, D::Error> {
@@ -89,6 +95,8 @@ pub struct AccountSummary {
     pub pinned_cert_sha256: Option<String>,
     pub enabled: bool,
     pub sync_days: u32,
+    pub signature_html: String,
+    pub signature_text: String,
 }
 
 /// One server-settings candidate (`account.resolve`).
@@ -227,8 +235,8 @@ where
             pinned_cert_sha256: valid.pin_hex.clone(),
             sync_days: DEFAULT_SYNC_DAYS,
             save_sent_copy: SaveSentCopy::Auto,
-            signature_html: String::new(),
-            signature_text: String::new(),
+            signature_html: config.signature_html.clone().unwrap_or_default(),
+            signature_text: config.signature_text.clone().unwrap_or_default(),
             enabled: true,
             created_at: now(),
         };
@@ -277,6 +285,14 @@ where
             smtp_security: store_security(config.smtp.security),
             username: config.username.trim().to_string(),
             pinned_cert_sha256: valid.pin_hex.clone(),
+            signature_html: config
+                .signature_html
+                .clone()
+                .unwrap_or(existing.signature_html.clone()),
+            signature_text: config
+                .signature_text
+                .clone()
+                .unwrap_or(existing.signature_text.clone()),
             ..existing
         };
         self.store.update_account(id, account).await?;
@@ -538,6 +554,8 @@ fn summary(id: AccountId, a: &NewAccount) -> AccountSummary {
         pinned_cert_sha256: a.pinned_cert_sha256.clone(),
         enabled: a.enabled,
         sync_days: a.sync_days,
+        signature_html: a.signature_html.clone(),
+        signature_text: a.signature_text.clone(),
     }
 }
 

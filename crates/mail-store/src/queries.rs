@@ -552,6 +552,13 @@ pub(crate) fn insert_synced(
             }
             None => None,
         };
+        // Contacts come from the From, To and Cc of mail received (section 10).
+        let people: Vec<(String, String)> = std::iter::once(&m.from)
+            .chain(&m.to)
+            .chain(&m.cc)
+            .map(|a| (a.addr.clone(), a.name.clone()))
+            .collect();
+        crate::outbox::bump_contacts(tx, account_id, &people, 1, m.date_utc)?;
         m.thread_id = match existing {
             Some(thread) => {
                 tx.execute(

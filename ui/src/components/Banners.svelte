@@ -43,6 +43,9 @@
         {#if t.undo !== undefined}
           {@const op = t.undo}
           <button class="toast-action press" onclick={() => app.undo(t.id, op)}>{strings.undo}</button>
+        {:else if t.undoSend !== undefined}
+          {@const item = t.undoSend}
+          <button class="toast-action press" onclick={() => app.undoSend(t.id, item)}>{strings.undo}</button>
         {/if}
         <button class="toast-button" onclick={() => app.dismissToast(t.id)} aria-label={strings.dismiss}>
           <Icon name="x" size="--icon-14" />

@@ -81,5 +81,7 @@ pub fn config(email: &str, username: &str, password: &str) -> AccountConfig {
         password: Some(Secret::new(password)),
         pinned_cert_sha256: None,
         save_anyway: false,
+        signature_html: None,
+        signature_text: None,
     }
 }

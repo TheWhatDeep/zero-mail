@@ -83,11 +83,20 @@ pub struct AccountHandle {
     account_id: AccountId,
     commands: mpsc::UnboundedSender<Command>,
     task: JoinHandle<()>,
+    caps: Arc<std::sync::Mutex<Option<mail_imap::Capabilities>>>,
 }
 
 impl AccountHandle {
     pub fn account_id(&self) -> AccountId {
         self.account_id
+    }
+
+    /// The capabilities of the last connection (APPENDLIMIT for the size check, section 7).
+    pub fn capabilities(&self) -> Option<mail_imap::Capabilities> {
+        self.caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// `folder.refresh`: sync the folder now, ahead of background work (priority 1).
@@ -171,17 +180,20 @@ where
     L: LoginSource,
 {
     let (tx, rx) = mpsc::unbounded_channel();
+    let caps: Arc<std::sync::Mutex<Option<mail_imap::Capabilities>>> = Arc::default();
     let actor = Actor {
         deps,
         account_id,
         commands: rx,
         open_folder: None,
         shown: None,
+        caps: Arc::clone(&caps),
     };
     AccountHandle {
         account_id,
         commands: tx,
         task: tokio::spawn(actor.run()),
+        caps,
     }
 }
 
@@ -191,6 +203,7 @@ struct Actor<C, L> {
     commands: mpsc::UnboundedReceiver<Command>,
     open_folder: Option<FolderId>,
     shown: Option<AccountState>,
+    caps: Arc<std::sync::Mutex<Option<mail_imap::Capabilities>>>,
 }
 
 enum Exit {
@@ -521,6 +534,10 @@ where
             healthy: connected.elapsed() >= HEALTHY,
         };
         let caps = worker.capabilities().clone();
+        *self
+            .caps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(caps.clone());
         self.state(AccountState::Syncing, None, None);
 
         let deps = self.deps.clone();

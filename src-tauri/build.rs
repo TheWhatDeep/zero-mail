@@ -34,6 +34,23 @@ const COMMANDS: &[&str] = &[
     "folder_set_sync",
     "folder_set_watch",
     "folder_extend_window",
+    "compose_new",
+    "compose_reply",
+    "compose_reply_all",
+    "compose_forward",
+    "draft_save",
+    "draft_discard",
+    "draft_add_attachment",
+    "draft_remove_attachment",
+    "draft_send",
+    "outbox_undo",
+    "outbox_retry",
+    "outbox_discard",
+    "outbox_list",
+    "identity_list",
+    "identity_save",
+    "identity_delete",
+    "contacts_suggest",
 ];
 
 fn main() {

@@ -593,3 +593,79 @@ None from spec v0.15. v0.14 and v0.15 record the owner's decisions G58–G61 and
 - **G58–G61:** resolved by the owner (see above).
 - **G62** (interpretations, owner to ratify): Undo's done rows and groups, Gmail Archive target, delete confirmation, Load older's window, read state, single selection, the Message-ID search, folder ops and LIST, flag pulls in one transaction, which folders G61 hides, and Undo of flag changes.
 - **Races found and fixed by the tests:** a `LIST` in flight could drop a folder created a moment before; a flag pull could briefly hide a fresh star; Undo by Message-ID could run before the destination synced. Each now has a test.
+
+## M7: done, tagged `m7` (2026-10-20)
+
+Scope: `smtp`, `outbox`, compose window, drafts, identities, contacts. Done when: T10 to T18.
+
+Every check below passes locally on Windows 10. CI: see the end of this entry.
+
+### Built
+- **`smtp`:**
+  - The message builder (section 7) writes these headers: Message-ID `<uuid@from-domain>`, Date, From, To, Cc, Reply-To, Subject, In-Reply-To and References, MIME-Version and Content-Type. It never writes a Bcc header or X-Mailer.
+  - The body is `multipart/alternative` (plain and HTML), or plain only. Attachments go in `multipart/mixed`, and a forwarded `.eml` as `message/rfc822`. Text is UTF-8 quoted-printable, attachments base64, and non-ASCII headers RFC 2047.
+  - The envelope is To, Cc and Bcc, deduplicated.
+  - Submission sends `RCPT` for every recipient and stops before `DATA` if any recipient is refused (T15).
+  - An error after `DATA` is reported as ambiguous, never as safe to retry.
+  - `SIZE` is read from EHLO.
+- **`outbox`:** the section 7 state machine.
+  - States: `queued`, then `sending` (claimed durably), then `sent`, `retry_wait`, `failed` or `unknown`.
+  - Retry waits are 30 s, 2 min, 10 min, then 1 h. The sixth failure becomes `failed` (G67).
+  - Items left in `sending` become `unknown` at start-up and are never retried automatically (T13).
+  - After a send, Core queues the Sent copy as an `ops` APPEND with `\Seen`. With `save_sent_copy: auto` there is no copy on `X-GM-EXT-1` servers (T11, G66). Core also sets `\Answered` or `$Forwarded` on the original, removes the draft, and weights the recipients 3 in `contacts`.
+- **Drafts:**
+  - Saved locally 5 s after typing stops.
+  - Uploaded 30 s after the last change and when the window closes: an `ops` APPEND with `\Draft`, then the old UID is deleted (T18).
+  - Sending or discarding removes the draft.
+- **`mail-core`:**
+  - Compose commands: `compose.new`, `compose.reply`, `compose.reply_all` (own identities excluded, deduplicated case-insensitively, T17), `compose.forward` (inline or as attachment).
+  - Draft commands: `draft.save`, `draft.discard`, `draft.add_attachment`, `draft.remove_attachment`, `draft.send`.
+  - Before queueing, `draft.send` checks SIZE and APPENDLIMIT when the server is reachable (G65, T16).
+  - Outbox commands: `outbox.undo`, `outbox.retry`, `outbox.discard`, `outbox.list` (G69).
+  - Identity commands: `identity.list`, `identity.save`, `identity.delete` (one default, never zero; G64).
+  - `contacts.suggest`: synced From, To and Cc count 1 use, sent recipients count 3. Suggestions rank by use, then recency, at most 10.
+  - Event `outbox-state`. `pending-count` now includes the outbox.
+  - The composer's HTML goes through the `ammonia` allowlist before building. Links and web images keep their real URLs (G67).
+- **`app`:**
+  - The 17 commands, added to the capability file.
+  - Compose windows (`compose-<draft>`, G63) are opened by the app with the draft in a start-up script.
+  - Send and Discard close the window; Edit and Undo reopen it.
+  - Closing a window flushes the last edit before it closes (G67).
+- **UI:**
+  - **Compose window:**
+    - From picker, and To/Cc/Bcc chips with autocomplete; red chips block sending.
+    - Subject, and a rich-text body (bold, italic, underline, lists, link) with a plain-text toggle.
+    - Attachments by button or drag and drop.
+    - The first body has the cursor line, then the signature, then the quote: `On <local date>, <name> <address> wrote:` with the original's plain text, escaped.
+    - Send on Ctrl/Cmd+Enter, with warnings for an empty subject and for a missing attachment.
+  - **Main window:**
+    - Compose button. Reply, Reply all, Forward and Forward as attachment in the reader. `mailto:` links open compose (G57).
+    - Sending toast with Undo.
+    - Per-account Outbox view with Retry, Edit and Discard, and a sidebar badge for failed and `unknown` items.
+    - Identities card in account settings.
+
+### Tests added (18 local Rust, 1 container, 11 UI; workspace total 212 Rust (8 container tests ignored locally) and 55 UI)
+- **`mail-core` on the fakes (`tests/send.rs`):**
+  - **T10:** To, Cc and Bcc each get one copy; no Bcc header.
+  - **T11:** one Sent copy with `\Seen`; none on the Gmail fake.
+  - **T12:** Undo at 5 s of a 10 s window; nothing reaches SMTP and the draft is back.
+  - **T13:** a crash after `DATA` restarts as `unknown` and is never resent.
+  - **T15:** a 550 recipient fails before `DATA`, and `failed` lists the address.
+  - **T16:** an attachment over SIZE is refused before queueing.
+  - **T17:** reply-all with the user's alias in Cc: own addresses out, no duplicates, In-Reply-To and References right.
+  - **T18:** one draft on the server at all times; the old UID goes after each upload.
+  - A sent draft leaves no Drafts copy. Identities keep a default.
+- **`mail-outbox`, T14:** 451 then recovery follows the retry schedule and delivers once.
+- **`mail-smtp`:** headers and structure (section 7), plain only, attachments and forwards, SIZE parsing.
+- **`mail-render`:** the outgoing sanitizer keeps real URLs and strips scripts and handlers.
+- **Stalwart (CI):** Alice sends To Bob, Cc Carol, Bcc herself. Each mailbox gets one copy, there is no Bcc header, and the Bcc address is invisible. Alice's Sent holds exactly one copy with `\Seen` (T10, T11 first half).
+- **UI:** address parsing and red chips, chip deduplication, both send warnings (quote and signature ignored), the first body for replies and forwards, `mailto:` parsing, and the outbox badge and filter.
+- **Visual check:** the compose window and the Outbox view in a browser with stubbed IPC. This found the quote missing its `> ` markers in the plain part and the trimmed `-- `; both are fixed.
+
+### Deviations
+None from spec v0.16.
+
+### Gaps found
+- **G63–G66, G69:** resolved by the owner.
+- **G67** (interpretations, owner to ratify): quoting, rich text, contacts, the undo window, the retry schedule, outgoing HTML, the arguments of `compose.new` and `draft.add_attachment`, Edit as `outbox.undo`, the plain part, the close flush, forward-as-attachment in draft uploads, signatures until M10, and the timing test hook.
+- **Found by review:** the composer's HTML first went through the display sanitizer, which would have sent `href="#"` links and `mail-remote://` images. It now has its own outgoing variant, with a test.

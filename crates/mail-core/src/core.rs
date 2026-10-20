@@ -115,6 +115,12 @@ pub enum CoreEvent {
     StorageWarning {
         kind: &'static str,
     },
+    /// Every outbox transition (section 3), plus `undone` and `discarded`.
+    OutboxState {
+        outbox_id: i64,
+        account_id: AccountId,
+        state: &'static str,
+    },
     /// Unfinished ops and outbox items (section 3).
     PendingCount {
         total: u32,
@@ -138,6 +144,7 @@ impl CoreEvent {
             Self::FolderReset { .. } => "folder-reset",
             Self::StorageWarning { .. } => "storage-warning",
             Self::PendingCount { .. } => "pending-count",
+            Self::OutboxState { .. } => "outbox-state",
             Self::OpFailed { .. } => "op-failed",
         }
     }
@@ -168,13 +175,23 @@ type States = Arc<Mutex<HashMap<AccountId, (StateName, Option<AppError>)>>>;
 pub struct Core<I, S, H> {
     pub(crate) store: Store,
     accounts: Accounts<I, S, H>,
-    deps: SyncDeps<I, KeychainLogins>,
+    pub(crate) deps: SyncDeps<I, KeychainLogins>,
+    /// Submission for the outbox (section 7).
+    pub(crate) smtp: S,
+    /// The undo window and upload delay (section 7).
+    timing: Mutex<crate::compose::Timing>,
+    /// One pending draft upload per draft (section 7, Drafts).
+    pub(crate) upload_timers: Mutex<HashMap<mail_store::DraftId, tokio::task::JoinHandle<()>>>,
+    /// Wakes the outbox runner when something is queued.
+    pub(crate) outbox_wake: Arc<tokio::sync::Notify>,
+    /// This core, for tasks that call back into it.
+    pub(crate) me: std::sync::OnceLock<std::sync::Weak<Self>>,
     pub(crate) actors: tokio::sync::Mutex<HashMap<AccountId, AccountHandle>>,
     states: States,
     pub(crate) sink: EventSink,
     /// The delayed integrity check; cancelled at shutdown.
     background: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     form: UrlForm,
     proxy: RemoteProxy,
     cache: AttachmentCache,
@@ -191,7 +208,7 @@ impl<I, S, H> std::fmt::Debug for Core<I, S, H> {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -234,8 +251,8 @@ fn open_store(data_dir: &Path) -> Result<(Store, bool), AppError> {
 impl<I, S, H> Core<I, S, H>
 where
     I: ImapConnector + Clone + 'static,
-    S: SmtpCheck,
-    H: HttpGet,
+    S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
+    H: HttpGet + 'static,
 {
     /// Opens the database (section 12 open path), starts one actor per account and the
     /// event pump, and schedules the background integrity check.
@@ -267,14 +284,23 @@ where
             logins: Arc::new(KeychainLogins::new(Arc::clone(&config.secrets))),
             events: Events::new(tx),
         };
+        // A crash mid-send leaves `sending`: never retried, the user decides (section 7).
+        for id in store.sending_to_unknown().await? {
+            tracing::warn!(outbox_id = id, "a send was interrupted; marked unknown");
+        }
         let core = Arc::new(Self {
             accounts: Accounts::new(
                 store.clone(),
                 Arc::clone(&config.secrets),
                 config.imap,
-                config.smtp,
+                config.smtp.clone(),
                 config.http,
             ),
+            smtp: config.smtp,
+            timing: Mutex::default(),
+            upload_timers: Mutex::default(),
+            outbox_wake: Arc::default(),
+            me: std::sync::OnceLock::new(),
             store,
             deps,
             actors: tokio::sync::Mutex::default(),
@@ -314,7 +340,24 @@ where
             }
         });
         lock(&core.background).push(check);
+        let _ = core.me.set(Arc::downgrade(&core));
+        let runner = tokio::spawn(outbox_runner(
+            Arc::downgrade(&core),
+            Arc::clone(&core.outbox_wake),
+        ));
+        lock(&core.background).push(runner);
         Ok(core)
+    }
+
+    /// The undo window and upload delay in use.
+    pub fn timing(&self) -> crate::compose::Timing {
+        *lock(&self.timing)
+    }
+
+    /// Changes them (tests use short ones).
+    pub fn set_timing(&self, timing: crate::compose::Timing) {
+        *lock(&self.timing) = timing;
+        self.outbox_wake.notify_one();
     }
 
     async fn start_actor(&self, account_id: AccountId) {
@@ -614,7 +657,10 @@ where
 
     /// A part's bytes, from the cache or fetched on demand through the account's actor
     /// (invariant 3).
-    async fn attachment_bytes(&self, record: &AttachmentRecord) -> Result<Vec<u8>, AppError> {
+    pub(crate) async fn attachment_bytes(
+        &self,
+        record: &AttachmentRecord,
+    ) -> Result<Vec<u8>, AppError> {
         let message = self.store.get_message(record.message_id).await?;
         let folder = self.store.get_folder(message.folder_id).await?;
         let key = CacheKey {
@@ -642,6 +688,15 @@ where
 
     /// One part (or with `""` the raw source) through the account's actor. An account that
     /// is offline or off answers `network`.
+    pub(crate) async fn fetch_part_pub(
+        &self,
+        account_id: AccountId,
+        message_id: MessageId,
+        part_id: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        self.fetch_part(account_id, message_id, part_id).await
+    }
+
     async fn fetch_part(
         &self,
         account_id: AccountId,
@@ -766,6 +821,35 @@ where
     }
 }
 
+/// Unfinished ops and outbox items (`pending-count`, section 3).
+pub(crate) async fn pending_total(store: &Store) -> Result<u32, StoreError> {
+    Ok(store.pending_count().await? + store.outbox_pending().await?)
+}
+
+/// Sends due outbox items every tick, and at once when woken (section 7). Ends with the core.
+async fn outbox_runner<I, S, H>(
+    core: std::sync::Weak<Core<I, S, H>>,
+    wake: Arc<tokio::sync::Notify>,
+) where
+    I: ImapConnector + Clone + 'static,
+    S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
+    H: HttpGet + 'static,
+{
+    loop {
+        let tick = match core.upgrade() {
+            Some(c) => {
+                c.process_outbox().await;
+                c.timing().outbox_tick
+            }
+            None => return,
+        };
+        tokio::select! {
+            () = tokio::time::sleep(tick) => {}
+            () = wake.notified() => {}
+        }
+    }
+}
+
 /// Runs file work off the async threads; an I/O failure is `io`.
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
@@ -852,11 +936,10 @@ async fn pump(
                 folder_id,
             }),
             SyncEvent::PendingChanged { .. } => {
-                if let Some(Ok(total)) = match &store {
-                    Some(s) => Some(s.pending_count().await),
-                    None => None,
-                } {
-                    sink(CoreEvent::PendingCount { total });
+                if let Some(s) = &store {
+                    if let Ok(total) = pending_total(s).await {
+                        sink(CoreEvent::PendingCount { total });
+                    }
                 }
             }
             SyncEvent::OpFailed {

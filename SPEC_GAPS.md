@@ -471,6 +471,14 @@ Options:
 - **Contacts:** every From, To and Cc of synced mail counts 1 use; every recipient of a sent message counts 3 (section 10: sent addresses weigh more). Suggestions rank by use count, then recency, at most 10.
 - **Undo window:** 10 s until the setting arrives with Settings (M10). Send later (section 18.3) is M9.
 - **Retry schedule:** `retry_wait` waits 30 s, 2 min, 10 min, then 1 h for every later attempt, and the sixth failed attempt is `failed` (section 7).
+- **Outgoing HTML:** the composer's HTML goes through the incoming allowlist (`mail_render::sanitize_outgoing`), but links and `http(s)` images keep their real URLs for the recipient; the reader's `mail-remote`/`data-href` rewrite applies only to display.
+- **Command arguments:** `compose.new` takes the account and an optional address (a `mailto:` link or the Compose button). `draft.add_attachment` takes an optional path (none: the native Open dialog, as Save does in G54) and, like `draft.remove_attachment`, returns the draft's attachment list, since the page cannot know the new attachment's id, name and size otherwise.
+- **Outbox actions:** Edit is `outbox.undo` (a queued, failed or `unknown` item goes back to its draft and the compose window reopens). The Outbox view lists unsent items; sent rows stay as history for section 18.3.
+- **Plain part:** built from the editor with quoted lines prefixed `> ` and the `-- ` signature line; the attach warning ignores both.
+- **Closing a compose window:** the app asks the page to save first and closes once that save lands (3 s at most), so the last 5 s of typing are not lost. No command, event or permission is added: the app runs the page's save hook.
+- **Draft uploads** carry the typed message and attachments but not a forward-as-attachment `.eml`; the original stays on the server and is attached again at send.
+- **Signatures:** the account's plain signature is placed by the composer; editing it is part of Settings (M10).
+- **Test hook:** `Core::set_timing` shortens the undo window, upload delay and outbox tick in tests only; the app never calls it.
 
 ## G68. The T19 WebView2 harness cannot open DevTools on CI — Resolved 2026-10-20: option (a), a CI-safe walk with a local beacon server
 The G56 harness passes on the build machine (44 corpus messages opened, zero outbound requests), but on GitHub's `windows-2025` runner WebView2 never opens the DevTools port: not with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, not with its own profile folder, not with WebView2's per-app registry override. The app runs and WebView2 starts; no policy is set on the runner.

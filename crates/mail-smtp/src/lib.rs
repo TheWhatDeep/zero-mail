@@ -2,16 +2,23 @@
 //! `smtp` (BUILD.md section 3): submission and outgoing MIME build. Never touches the
 //! database.
 //!
-//! M2 builds the connection test of account setup (section 5, step 4; SPEC_GAPS G32):
-//! connect, `EHLO`, `AUTH`, `QUIT`, with no message sent. Submission arrives in M7.
+//! - The connection test of account setup (section 5, step 4; SPEC_GAPS G32): connect,
+//!   `EHLO`, `AUTH`, `QUIT`, with no message sent (M2).
+//! - Submission ([`SmtpSubmit`]) and the outgoing MIME build ([`build`]), M7.
 //!
 //! TLS is ours, not lettre's, so the same OS verifier and per-account pin apply as for IMAP:
 //! implicit TLS on 465, or required STARTTLS on 587 that aborts when STARTTLS is not offered
 //! (section 5, Transport security). lettre then speaks SMTP over the encrypted stream.
 
+pub mod build;
 mod error;
+mod submit;
 mod tls;
 mod trace;
+
+pub use build::{BuiltMessage, MailboxSpec, OutgoingAttachment, OutgoingMessage};
+pub use lettre::Address;
+pub use submit::{Envelope, SmtpLogin, SmtpSubmit, SubmitError};
 
 pub use trace::TARGET as TRACE_TARGET;
 
@@ -24,7 +31,6 @@ use std::future::Future;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use lettre::transport::smtp::authentication::{Credentials as LettreCredentials, Mechanism};
 use lettre::transport::smtp::client::AsyncSmtpConnection;
 use lettre::transport::smtp::extension::ClientId;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,6 +38,9 @@ use tokio::net::TcpStream;
 
 /// Timeout for each SMTP step (section 12: 60 s for normal commands).
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Timeout for sending the message data and reading the reply (section 12: 5 min for
+/// large transfers).
+pub const DATA_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Transport security. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +79,7 @@ pub trait SmtpCheck: Send + Sync {
 pub struct SmtpClient;
 
 /// The EHLO name. An address literal, so the machine's host name never leaves it.
-fn client_id() -> ClientId {
+pub(crate) fn client_id() -> ClientId {
     ClientId::Ipv4(Ipv4Addr::LOCALHOST)
 }
 
@@ -81,6 +90,40 @@ impl SmtpCheck for SmtpClient {
         username: &str,
         password: &str,
     ) -> Result<(), SmtpError> {
+        let mut conn = connect(config).await?;
+        let login = SmtpLogin::Password {
+            username: username.to_string(),
+            password: password.to_string(),
+        };
+        if let Err(err) = submit::authenticate(&mut conn, &login).await {
+            conn.abort().await;
+            return Err(err);
+        }
+        // The login is what was tested; a failed QUIT changes nothing.
+        let _ = step(conn.quit()).await;
+        Ok(())
+    }
+}
+
+impl SmtpSubmit for SmtpClient {
+    async fn submit(
+        &self,
+        config: &SmtpConfig,
+        login: &SmtpLogin,
+        envelope: &Envelope,
+        raw: &[u8],
+    ) -> Result<(), SubmitError> {
+        submit::submit(config, login, envelope, raw).await
+    }
+
+    async fn size_limit(&self, config: &SmtpConfig) -> Result<Option<u64>, SmtpError> {
+        submit::size_limit(config).await
+    }
+}
+
+/// TCP, TLS (implicit, or required STARTTLS) and lettre's greeting and `EHLO`.
+pub(crate) async fn connect(config: &SmtpConfig) -> Result<AsyncSmtpConnection, SmtpError> {
+    {
         let timeout = config.connect_timeout;
         let tcp = tokio::time::timeout(
             timeout,
@@ -89,7 +132,7 @@ impl SmtpCheck for SmtpClient {
         .await
         .map_err(|_| SmtpError::Timeout)?
         .map_err(|e| SmtpError::Network(e.kind().to_string()))?;
-        let mut conn = match config.security {
+        let conn = match config.security {
             Security::Tls => {
                 let tls =
                     tls::handshake(tcp, &config.host, config.pinned_cert_sha256, timeout).await?;
@@ -116,23 +159,12 @@ impl SmtpCheck for SmtpClient {
                 .await?
             }
         };
-        let credentials = LettreCredentials::new(username.to_string(), password.to_string());
-        let auth = step(conn.auth(&[Mechanism::Plain, Mechanism::Login], &credentials)).await;
-        if let Err(err) = auth {
-            conn.abort().await;
-            return Err(match err {
-                SmtpError::Rejected(_) => SmtpError::AuthFailed,
-                other => other,
-            });
-        }
-        // The login is what was tested; a failed QUIT changes nothing.
-        let _ = step(conn.quit()).await;
-        Ok(())
+        Ok(conn)
     }
 }
 
 /// One lettre step under the command timeout.
-async fn step<T>(
+pub(crate) async fn step<T>(
     fut: impl Future<Output = Result<T, lettre::transport::smtp::Error>>,
 ) -> Result<T, SmtpError> {
     tokio::time::timeout(COMMAND_TIMEOUT, fut)

@@ -26,6 +26,56 @@ pub mod kind {
     pub const FOLDER_CREATE: &str = "folder_create";
     pub const FOLDER_RENAME: &str = "folder_rename";
     pub const FOLDER_DELETE: &str = "folder_delete";
+    /// The Sent copy of an outbox item (section 7; SPEC_GAPS G66).
+    pub const APPEND: &str = "append";
+    /// Upload a draft's new version and remove the previous one (section 7, Drafts).
+    pub const DRAFT_REPLACE: &str = "draft_replace";
+    /// Remove an uploaded draft (sent or discarded).
+    pub const DRAFT_DELETE: &str = "draft_delete";
+}
+
+/// The Sent copy of outbox item `outbox_id`, to `sent` (section 7). Whether it is filed is
+/// decided when it runs: `save_sent_copy` `auto` is off on servers with `X-GM-EXT-1`.
+pub fn append_op(account_id: AccountId, sent: &Folder, outbox_id: i64) -> NewOp {
+    NewOp {
+        account_id,
+        folder_id: sent.id,
+        uids: Vec::new(),
+        kind: kind::APPEND.into(),
+        args: json!({ "outbox_id": outbox_id }),
+        overlay: Overlay::default(),
+    }
+}
+
+/// A draft's new version, already built (`raw_b64`), to `drafts`; the previous uploaded
+/// UID is removed after the APPEND (section 7, T18).
+pub fn draft_replace_op(
+    account_id: AccountId,
+    drafts: &Folder,
+    draft_id: i64,
+    raw_b64: String,
+    message_id: &str,
+) -> NewOp {
+    NewOp {
+        account_id,
+        folder_id: drafts.id,
+        uids: Vec::new(),
+        kind: kind::DRAFT_REPLACE.into(),
+        args: json!({ "draft_id": draft_id, "raw_b64": raw_b64, "message_id": message_id }),
+        overlay: Overlay::default(),
+    }
+}
+
+/// Removes an uploaded draft copy.
+pub fn draft_delete_op(account_id: AccountId, drafts: &Folder, uid: u32) -> NewOp {
+    NewOp {
+        account_id,
+        folder_id: drafts.id,
+        uids: vec![uid],
+        kind: kind::DRAFT_DELETE.into(),
+        args: json!({}),
+        overlay: Overlay::default(),
+    }
 }
 
 fn flag_names(flags: &[Flag]) -> Vec<String> {
@@ -237,6 +287,11 @@ async fn run_message_op<T: ImapTransport>(
     folder: &Folder,
     op: &PendingOp,
 ) -> Result<Outcome, SyncError> {
+    match op.kind.as_str() {
+        kind::APPEND => return append_sent(t, store, folder, op).await,
+        kind::DRAFT_REPLACE => return replace_draft(t, store, folder, op).await,
+        _ => {}
+    }
     let mut uids = op.uids.clone();
     if op.args["find"].as_bool() == Some(true) {
         // No COPYUID: find the messages again by Message-ID (section 9, Undo). The server
@@ -333,7 +388,7 @@ async fn run_message_op<T: ImapTransport>(
             });
             Ok(Outcome::Moved(json!({ "copyuid": copyuid })))
         }
-        kind::EXPUNGE => {
+        kind::EXPUNGE | kind::DRAFT_DELETE => {
             for chunk in set.chunks() {
                 t.uid_store(&chunk, StoreOp::Add, &[Flag::Deleted]).await?;
                 expunge_exactly(t, &chunk).await?;
@@ -342,6 +397,84 @@ async fn run_message_op<T: ImapTransport>(
         }
         _ => Err(SyncError::Store(format!("unknown op kind {}", op.kind))),
     }
+}
+
+/// Files the Sent copy (section 7): `APPEND` with `\Seen`, unless the account's
+/// `save_sent_copy` says no (`auto` is off where the server advertises `X-GM-EXT-1`, as Gmail
+/// files its own copy). The raw message is dropped from the outbox afterwards.
+async fn append_sent<T: ImapTransport>(
+    t: &mut T,
+    store: &Store,
+    folder: &Folder,
+    op: &PendingOp,
+) -> Result<Outcome, SyncError> {
+    let outbox_id = op.args["outbox_id"].as_i64().unwrap_or_default();
+    let account = store.get_account(op.account_id).await?;
+    let wanted = match account.config.save_sent_copy {
+        mail_store::SaveSentCopy::On => true,
+        mail_store::SaveSentCopy::Off => false,
+        mail_store::SaveSentCopy::Auto => !t.capabilities().gmail,
+    };
+    let raw = match store.outbox_raw(outbox_id).await {
+        Ok(raw) => raw,
+        Err(mail_store::StoreError::NotFound) => return Ok(Outcome::Dropped),
+        Err(e) => return Err(e.into()),
+    };
+    if wanted && !raw.is_empty() {
+        t.append(&folder.path, &[Flag::Seen], &raw).await?;
+    }
+    store.clear_outbox_raw(outbox_id).await?;
+    Ok(if wanted {
+        Outcome::Flags
+    } else {
+        Outcome::Dropped
+    })
+}
+
+/// Uploads a draft's new version with `\Draft`, then removes the previously uploaded UID,
+/// so the server holds one copy (section 7, T18). Without APPENDUID the new copy is found
+/// by its Message-ID.
+async fn replace_draft<T: ImapTransport>(
+    t: &mut T,
+    store: &Store,
+    folder: &Folder,
+    op: &PendingOp,
+) -> Result<Outcome, SyncError> {
+    let draft_id = op.args["draft_id"].as_i64().unwrap_or_default();
+    let draft = match store.get_draft(draft_id).await {
+        Ok(d) => d,
+        // Sent or discarded meanwhile: its own op removes the uploaded copy.
+        Err(mail_store::StoreError::NotFound) => return Ok(Outcome::Dropped),
+        Err(e) => return Err(e.into()),
+    };
+    let raw_b64 = op.args["raw_b64"].as_str().unwrap_or_default();
+    let raw = mail_parser::decoders::base64::base64_decode(raw_b64.as_bytes())
+        .ok_or_else(|| SyncError::Store("draft could not be decoded".into()))?;
+    let appended = t
+        .append(&folder.path, &[Flag::Draft, Flag::Seen], &raw)
+        .await?;
+    let old = draft.imap_uid;
+    let new_uid = match appended {
+        Some(a) => Some(a.uid),
+        None => {
+            let id = op.args["message_id"].as_str().unwrap_or_default();
+            let key = SearchKey::Header("Message-ID".into(), format!("<{id}>"));
+            t.uid_search(&key)
+                .await?
+                .into_iter()
+                .filter(|u| Some(*u) != old)
+                .max()
+        }
+    };
+    if let Some(old) = old.filter(|o| Some(*o) != new_uid) {
+        let set = UidSet::single(old);
+        t.uid_store(&set, StoreOp::Add, &[Flag::Deleted]).await?;
+        expunge_exactly(t, &set).await?;
+    }
+    store
+        .set_draft_uploaded(draft_id, new_uid, crate::now())
+        .await?;
+    Ok(Outcome::Flags)
 }
 
 /// Removes exactly `uids`, which carry `\Deleted` (section 9, Move fallback): `UID EXPUNGE`

@@ -78,6 +78,8 @@ fn config(user: &str, password: &str, starttls: bool) -> AccountConfig {
         password: Some(mail_secrets::Secret::new(password)),
         pinned_cert_sha256: None,
         save_anyway: false,
+        signature_html: None,
+        signature_text: None,
     }
 }
 
@@ -286,6 +288,175 @@ async fn m5_html_cid_images_and_attachments_through_the_real_transport() {
         .await
         .unwrap();
     assert!(String::from_utf8_lossy(&std::fs::read(&source).unwrap()).contains(&subject));
+    core.shutdown().await;
+}
+
+/// T10 and T11 against the real servers: Alice sends To Bob, Cc Carol and Bcc herself.
+/// Each mailbox gets exactly one copy, no copy carries a Bcc header or Alice's address as a
+/// recipient, and Alice's Sent folder holds exactly one copy with `\Seen`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs the Stalwart container; runs in CI"]
+async fn m7_to_cc_bcc_each_once_and_one_sent_copy() {
+    use mail_core::compose::{DraftContent, Timing};
+    use mail_core::views::AddressView;
+    use mail_core::{Core, CoreConfig, CoreEvent, EventSink, StateName};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new("stalwart-m7");
+    let accounts = service(&dir).await;
+    let pin_hex = fingerprint(&accounts).await;
+    drop(accounts);
+    let pin = mail_imap::parse_fingerprint(&pin_hex).unwrap();
+    let events: Arc<Mutex<Vec<CoreEvent>>> = Arc::default();
+    let log = Arc::clone(&events);
+    let sink: EventSink = Arc::new(move |e| log.lock().unwrap().push(e));
+    let core = Core::start(
+        CoreConfig {
+            data_dir: dir.path().join("core"),
+            secrets: secrets() as Arc<dyn SecretStore>,
+            imap: ImapClient,
+            smtp: SmtpClient,
+            http: NoHttp,
+        },
+        sink,
+    )
+    .await
+    .unwrap();
+    core.set_timing(Timing {
+        undo_window: Duration::ZERO,
+        draft_upload: Duration::from_secs(3600),
+        outbox_tick: Duration::from_millis(200),
+    });
+    let mut c = config("alice", "alice-test-pw", false);
+    c.pinned_cert_sha256 = Some(pin_hex);
+    let account = core.account_add(c).await.unwrap().id;
+    let start = Instant::now();
+    let deadline = Duration::from_secs(120);
+    while !events.lock().unwrap().iter().any(|e| {
+        matches!(e, CoreEvent::AccountState { state: StateName::Idle, account_id, .. } if *account_id == account)
+    }) {
+        assert!(start.elapsed() < deadline, "never idle");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let subject = format!("m7-{nanos}");
+    let view = core.compose_new(account, None).await.unwrap();
+    let person = |a: &str| AddressView {
+        name: String::new(),
+        addr: a.into(),
+    };
+    let content = DraftContent {
+        to: vec![person("bob@test.local")],
+        cc: vec![person("carol@test.local")],
+        bcc: vec![person("alice@test.local")],
+        subject: subject.clone(),
+        html: "<p>Hello from <b>M7</b></p>".into(),
+        text: "Hello from M7".into(),
+        ..view.content
+    };
+    core.draft_save(view.draft_id, content).await.unwrap();
+    let identity = view.identities[0].id.unwrap();
+    let id = core
+        .draft_send(view.draft_id, identity, None)
+        .await
+        .unwrap();
+    loop {
+        let state = core
+            .outbox_list(account)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|o| o.id == id)
+            .map(|o| o.state);
+        if state == Some("sent") {
+            break;
+        }
+        assert_ne!(state, Some("failed"), "the send failed");
+        assert!(start.elapsed() < deadline, "never sent: {state:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let imap_config = ConnectConfig {
+        host: HOST.into(),
+        port: IMAPS,
+        security: mail_imap::Security::Tls,
+        pinned_cert_sha256: Some(pin),
+        connect_timeout: mail_imap::CONNECT_TIMEOUT,
+    };
+    for (user, folder) in [("bob", "INBOX"), ("carol", "INBOX"), ("alice", "INBOX")] {
+        let creds = Credentials::Password {
+            username: user.into(),
+            password: Secret::new(format!("{user}-test-pw")),
+        };
+        let mut session = ImapClient.connect(&imap_config, &creds).await.unwrap();
+        let uids = loop {
+            session.select(folder).await.unwrap();
+            let uids = session
+                .uid_search(&mail_imap::SearchKey::Subject(subject.clone()))
+                .await
+                .unwrap();
+            if !uids.is_empty() {
+                break uids;
+            }
+            assert!(start.elapsed() < deadline, "{user} never got it");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        };
+        assert_eq!(uids.len(), 1, "{user}: exactly one copy");
+        let raw = session.uid_fetch_part(uids[0], "", None).await.unwrap();
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        let head = text
+            .split("\r\n\r\n")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        assert!(!head.contains("\nbcc:"), "{user}: no Bcc header");
+        let recipients: String = head
+            .lines()
+            .filter(|l| l.starts_with("to:") || l.starts_with("cc:"))
+            .collect();
+        assert!(
+            !recipients.contains("alice@test.local"),
+            "{user}: Bcc address invisible"
+        );
+        session.logout().await.unwrap();
+    }
+    // T11: one Sent copy, `\Seen`, on a server without X-GM-EXT-1.
+    let creds = Credentials::Password {
+        username: "alice".into(),
+        password: Secret::new("alice-test-pw"),
+    };
+    let mut session = ImapClient.connect(&imap_config, &creds).await.unwrap();
+    let mut folders = session.list().await.unwrap();
+    mail_imap::assign_roles(&mut folders);
+    let sent = folders
+        .iter()
+        .find(|f| f.special_use == Some(mail_imap::SpecialUse::Sent))
+        .expect("a Sent folder")
+        .path
+        .clone();
+    let uids = loop {
+        session.select(&sent).await.unwrap();
+        let uids = session
+            .uid_search(&mail_imap::SearchKey::Subject(subject.clone()))
+            .await
+            .unwrap();
+        if !uids.is_empty() {
+            break uids;
+        }
+        assert!(start.elapsed() < deadline, "no Sent copy");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    };
+    assert_eq!(uids.len(), 1, "exactly one Sent copy");
+    let flags = session
+        .uid_fetch_flags(&mail_imap::UidSet::single(uids[0]), None)
+        .await
+        .unwrap();
+    assert!(flags.updates[0].flags.contains(&mail_imap::Flag::Seen));
+    session.logout().await.unwrap();
     core.shutdown().await;
 }
 

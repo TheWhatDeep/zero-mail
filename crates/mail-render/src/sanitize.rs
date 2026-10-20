@@ -189,7 +189,8 @@ impl Rewrite {
     }
 }
 
-fn builder(rules: Arc<Rewrite>) -> ammonia::Builder<'static> {
+/// The allowlist itself, shared by incoming mail and the composer's outgoing HTML.
+fn allowlist() -> ammonia::Builder<'static> {
     let mut b = ammonia::Builder::empty();
     b.tags(TAGS.iter().copied().collect())
         .clean_content_tags(REMOVED_WITH_CONTENT.iter().copied().collect())
@@ -203,11 +204,44 @@ fn builder(rules: Arc<Rewrite>) -> ammonia::Builder<'static> {
         .url_schemes(URL_SCHEMES.iter().copied().collect())
         .url_relative(ammonia::UrlRelative::Deny)
         .link_rel(None)
-        .strip_comments(true)
-        .attribute_filter(move |element, attribute, value| {
-            filter(&rules, element, attribute, value)
-        });
+        .strip_comments(true);
     b
+}
+
+fn builder(rules: Arc<Rewrite>) -> ammonia::Builder<'static> {
+    let mut b = allowlist();
+    b.attribute_filter(move |element, attribute, value| filter(&rules, element, attribute, value));
+    b
+}
+
+/// An outgoing image reference keeps only `http(s)`: the recipient's client loads it, and
+/// local schemes mean nothing there.
+fn outgoing_image(url: &str) -> Option<String> {
+    let url = url.trim();
+    matches!(urls::scheme(url).as_deref(), Some("http" | "https")).then(|| url.to_string())
+}
+
+fn outgoing_filter<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
+    match (element, attribute) {
+        ("img", "src") | (_, "background") => outgoing_image(value).map(Cow::Owned),
+        ("a", "href") => {
+            let scheme = urls::scheme(value)?;
+            LINK_SCHEMES
+                .contains(&scheme.as_str())
+                .then_some(Cow::Borrowed(value))
+        }
+        (_, "style") => Some(Cow::Owned(css::rewrite(value, &outgoing_image))),
+        _ => Some(Cow::Borrowed(value)),
+    }
+}
+
+/// The composer's HTML before a message is built (SPEC_GAPS G67): the same allowlist as
+/// incoming mail, with links and web images kept as real URLs for the recipient.
+pub fn sanitize_outgoing(html: &str) -> String {
+    let mut b = allowlist();
+    b.attribute_filter(outgoing_filter);
+    let cleaned = b.clean(html).to_string();
+    rewrite_styles_with(&cleaned, &outgoing_image)
 }
 
 fn filter<'u>(
@@ -237,7 +271,7 @@ pub fn sanitize(html: &str, message_id: i64, form: UrlForm) -> Sanitized {
         remote: AtomicUsize::new(0),
     });
     let cleaned = builder(Arc::clone(&rules)).clean(html).to_string();
-    let html = rewrite_styles(&move_links(&cleaned), &rules);
+    let html = rewrite_styles_with(&move_links(&cleaned), &|u| rules.image(u));
     Sanitized {
         html,
         remote_images: rules.remote.load(Ordering::Relaxed),
@@ -270,7 +304,7 @@ fn move_links(html: &str) -> String {
 
 /// Rewrites the CSS inside every kept `<style>` element. The parser ends a style element
 /// at the first `</style`, so its serialized text contains none.
-fn rewrite_styles(html: &str, rules: &Rewrite) -> String {
+fn rewrite_styles_with(html: &str, map: &dyn Fn(&str) -> Option<String>) -> String {
     let lower = html.to_ascii_lowercase();
     let mut out = String::with_capacity(html.len());
     let mut i = 0;
@@ -283,7 +317,7 @@ fn rewrite_styles(html: &str, rules: &Rewrite) -> String {
             break;
         };
         out.push_str(&html[i..open_end]);
-        out.push_str(&css::rewrite(&html[open_end..close], &|u| rules.image(u)));
+        out.push_str(&css::rewrite(&html[open_end..close], map));
         i = close;
         out.push_str("</style");
         i += "</style".len();
@@ -315,6 +349,25 @@ mod tests {
             !s.html.contains("onclick") && !s.html.contains("id=") && !s.html.contains("<title")
         );
         assert_eq!(s.remote_images, 0);
+    }
+
+    #[test]
+    fn outgoing_keeps_real_urls_and_the_allowlist() {
+        let h = sanitize_outgoing(
+            "<p onclick=\"x()\">Hi <a href=\"https://example.test/a?b=1&amp;c=2\">a</a>\
+             <a href=\"javascript:alert(1)\">j</a><img src=\"https://img.test/i.png\">\
+             <img src=\"cid:x@y\"><script>alert(1)</script>\
+             <span style=\"background:url('https://css.test/c.png')\">s</span></p>",
+        );
+        assert!(
+            h.contains("href=\"https://example.test/a?b=1&amp;c=2\""),
+            "{h}"
+        );
+        assert!(h.contains("src=\"https://img.test/i.png\""), "{h}");
+        assert!(h.contains("https://css.test/c.png"), "{h}");
+        assert!(!h.contains("data-href") && !h.contains("mail-remote") && !h.contains("mail-cid"));
+        assert!(!h.contains("onclick") && !h.contains("javascript") && !h.contains("<script"));
+        assert!(!h.contains("cid:"), "{h}");
     }
 
     #[test]

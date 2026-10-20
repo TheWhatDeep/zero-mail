@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-contacts-suggest"
+description = "Enables the contacts_suggest command without any pre-configured scope."
+commands.allow = ["contacts_suggest"]
+
+[[permission]]
+identifier = "deny-contacts-suggest"
+description = "Denies the contacts_suggest command without any pre-configured scope."
+commands.deny = ["contacts_suggest"]

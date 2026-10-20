@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-compose-new"
+description = "Enables the compose_new command without any pre-configured scope."
+commands.allow = ["compose_new"]
+
+[[permission]]
+identifier = "deny-compose-new"
+description = "Denies the compose_new command without any pre-configured scope."
+commands.deny = ["compose_new"]

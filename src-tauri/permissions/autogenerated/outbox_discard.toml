@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-outbox-discard"
+description = "Enables the outbox_discard command without any pre-configured scope."
+commands.allow = ["outbox_discard"]
+
+[[permission]]
+identifier = "deny-outbox-discard"
+description = "Denies the outbox_discard command without any pre-configured scope."
+commands.deny = ["outbox_discard"]

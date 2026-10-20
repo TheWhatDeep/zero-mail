@@ -59,9 +59,14 @@ struct Group {
 impl<I, S, H> Core<I, S, H>
 where
     I: ImapConnector + Clone + 'static,
-    S: SmtpCheck,
-    H: HttpGet,
+    S: SmtpCheck + mail_smtp::SmtpSubmit + Clone + 'static,
+    H: HttpGet + 'static,
 {
+    /// Queues ops (for the outbox and drafts); see [`Self::queue`].
+    pub(crate) async fn queue_ops(&self, new: Vec<NewOp>) -> Result<OpId, AppError> {
+        self.queue(new).await
+    }
+
     /// The command's messages, by source folder.
     async fn groups(&self, message_ids: &[MessageId]) -> Result<Vec<Group>, AppError> {
         let mut by_folder: BTreeMap<FolderId, (AccountId, Vec<u32>, Vec<String>)> = BTreeMap::new();
@@ -147,9 +152,9 @@ where
         Ok(())
     }
 
-    /// `pending-count`: unfinished ops (outbox items join in M7).
+    /// `pending-count`: unfinished ops and outbox items.
     pub(crate) async fn emit_pending(&self) {
-        if let Ok(total) = self.store.pending_count().await {
+        if let Ok(total) = crate::core::pending_total(&self.store).await {
             (self.sink)(CoreEvent::PendingCount { total });
         }
     }

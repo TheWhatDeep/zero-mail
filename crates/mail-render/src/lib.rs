@@ -22,7 +22,7 @@ pub mod urls;
 
 pub use files::{display_name, is_executable, safe_name, AttachmentCache, CacheKey, TempFiles};
 pub use remote::{RemoteError, RemoteProxy};
-pub use sanitize::{sanitize, Sanitized, REMOVED_WITH_CONTENT};
+pub use sanitize::{sanitize, sanitize_outgoing, Sanitized, REMOVED_WITH_CONTENT};
 pub use urls::UrlForm;
 
 use mail_store::{Body, MessageId, Store, StoreError};

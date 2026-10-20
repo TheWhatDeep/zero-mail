@@ -11,6 +11,7 @@
   import { addressList, formatSize, personName, readerDateText, subjectText } from "../lib/format";
   import { READ_DELAY_MS, deleteNeedsConfirm, moveTargets } from "../lib/actions";
   import { commands, toAppError, type AppError, type Attachment } from "../lib/ipc";
+  import { mailtoAddress } from "../lib/compose";
   import { bodyUrl, decideLink, type LinkAction } from "../lib/links";
   import { platformUrl, usesHttpScheme } from "../lib/protocol";
   import { applyOpen, bodyArrived, emptyReader, type ReaderState } from "../lib/reader";
@@ -120,7 +121,11 @@
     pendingLink = null;
     if (action.kind === "open") void run(() => commands["link.open"](action.href));
     else if (action.kind === "confirm") pendingLink = action;
-    // compose: mailto opens compose from M7 (SPEC_GAPS G57); ignore: nothing happens.
+    else if (action.kind === "compose" && reader.kind === "open") {
+      const account = reader.view.account_id;
+      void run(() => commands["compose.new"](account, mailtoAddress(action.href)));
+    }
+    // ignore: nothing happens.
   }
 
   async function allowImages(always: boolean): Promise<void> {
@@ -178,6 +183,12 @@
       {/if}
       {#if !(reader.kind === "open" && reader.deleted)}
         <div class="toolbar" role="toolbar" aria-label={strings.actionsLabel}>
+          <button class="small tint press" onclick={() => run(() => commands["compose.reply"](view.id))}>{strings.reply}</button>
+          <button class="small tint press" onclick={() => run(() => commands["compose.reply_all"](view.id))}>{strings.replyAll}</button>
+          <button class="small tint press" onclick={() => run(() => commands["compose.forward"](view.id, false))}>{strings.forward}</button>
+          <button class="small tint press" onclick={() => run(() => commands["compose.forward"](view.id, true))}>
+            {strings.forwardAsAttachment}
+          </button>
           {#if view.can_archive}
             <button class="small tint press" onclick={() => undoable(() => commands["message.archive"]([view.id]), strings.archivedToast)}>
               <Icon name="archive" size="--icon-14" />{strings.archive}

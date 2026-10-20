@@ -9,6 +9,90 @@ pub type MessageId = i64;
 pub type IdentityId = i64;
 pub type AttachmentId = i64;
 pub type OpId = i64;
+pub type OutboxId = i64;
+pub type DraftId = i64;
+
+/// Outbox states (section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxState {
+    Queued,
+    Sending,
+    RetryWait,
+    Sent,
+    Failed,
+    Unknown,
+}
+
+impl OutboxState {
+    pub(crate) fn from_sql(text: &str) -> Option<Self> {
+        match text {
+            "queued" => Some(Self::Queued),
+            "sending" => Some(Self::Sending),
+            "retry_wait" => Some(Self::RetryWait),
+            "sent" => Some(Self::Sent),
+            "failed" => Some(Self::Failed),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::RetryWait => "retry_wait",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A new outbox row: the message is durable before any network call (section 7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewOutbox {
+    pub account_id: AccountId,
+    pub identity_id: IdentityId,
+    pub raw_mime: Vec<u8>,
+    /// The SMTP envelope and what the outbox needs afterwards; the store keeps it as is.
+    pub envelope: serde_json::Value,
+    pub send_after_utc: i64,
+    pub created_at: i64,
+}
+
+/// An outbox row without its raw message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutboxItem {
+    pub id: OutboxId,
+    pub account_id: AccountId,
+    pub identity_id: IdentityId,
+    pub envelope: serde_json::Value,
+    pub state: OutboxState,
+    pub send_after_utc: i64,
+    pub attempts: u32,
+    pub last_error: String,
+    pub created_at: i64,
+}
+
+/// A draft (section 7, Drafts): its content as JSON and its uploaded copy's UID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Draft {
+    pub id: DraftId,
+    pub account_id: AccountId,
+    pub imap_uid: Option<u32>,
+    pub content: serde_json::Value,
+    pub updated_at: i64,
+    pub uploaded_at: Option<i64>,
+}
+
+/// A contact for autocomplete (section 10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contact {
+    pub address: String,
+    pub name: String,
+    pub last_used_utc: i64,
+    pub use_count: u32,
+}
 
 /// Transport security for an endpoint. There is no plaintext option (section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

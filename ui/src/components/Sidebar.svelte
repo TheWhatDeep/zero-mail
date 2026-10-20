@@ -5,8 +5,8 @@
   import Icon from "./Icon.svelte";
   import type { IconName } from "../lib/icons";
   import { visibleFolders } from "../lib/actions";
-  import type { FolderView, Role } from "../lib/ipc";
-  import { app } from "../state/app.svelte";
+  import { commands, type FolderView, type Role } from "../lib/ipc";
+  import { app, needsAction } from "../state/app.svelte";
   import { strings } from "../strings";
 
   const ROLE_ICON: Record<Role, IconName> = {
@@ -24,13 +24,27 @@
   }
 
   function active(f: FolderView): boolean {
-    return app.selected?.account_id === f.account_id && app.selected.folder_id === f.id;
+    return app.outboxAccount === null && app.selected?.account_id === f.account_id && app.selected.folder_id === f.id;
+  }
+
+  /** Compose from the account in view (section 11, Compose; SPEC_GAPS G63). */
+  function compose(): void {
+    const account = app.outboxAccount ?? app.selected?.account_id ?? app.accounts[0]?.id;
+    if (account !== undefined) void app.act(() => commands["compose.new"](account));
   }
 </script>
 
 <nav class="sidebar" aria-label={strings.sidebarLabel}>
+  <div class="compose">
+    <button class="item tint" onclick={compose}>
+      <span class="icon"><Icon name="plus" size="--icon-17" /></span>
+      <span class="name">{strings.compose}</span>
+    </button>
+  </div>
   <div class="accounts">
     {#each app.accounts as account (account.id)}
+      {@const attention = needsAction(app.outbox[account.id] ?? [])}
+      {@const open = app.outboxAccount === account.id}
       <section class="account">
         <button
           class="label tint"
@@ -57,6 +71,20 @@
               </button>
             </li>
           {/each}
+          <li>
+            <button
+              class="item tint"
+              class:is-active={open}
+              aria-current={open ? "page" : undefined}
+              onclick={() => app.openOutbox(account.id)}
+            >
+              <span class="icon"><Icon name="paperPlaneTilt" size="--icon-17" /></span>
+              <span class="name">{strings.outbox}</span>
+              {#if attention > 0}
+                <span class="badge alert" title={strings.needsAction(attention)}>{attention.toLocaleString("en")}</span>
+              {/if}
+            </button>
+          </li>
         </ul>
       </section>
     {/each}
@@ -80,11 +108,15 @@
     color: var(--color-sidebar-text);
   }
 
+  .compose {
+    padding: var(--space-14) 0 0;
+  }
+
   .accounts {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding-top: var(--space-18);
+    padding-top: var(--space-14);
   }
 
   .account + .account {
@@ -158,6 +190,12 @@
     font-size: var(--text-tag);
     text-align: center;
     color: var(--color-sidebar-badge-text);
+  }
+
+  .badge.alert {
+    border-color: var(--color-status-attention);
+    color: var(--color-status-attention);
+    font-weight: var(--font-weight-semibold);
   }
 
   .badge.solid {

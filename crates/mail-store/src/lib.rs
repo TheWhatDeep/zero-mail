@@ -8,6 +8,7 @@
 
 mod error;
 mod ops;
+mod outbox;
 mod queries;
 mod schema;
 mod types;
@@ -367,6 +368,18 @@ impl Store {
             .await
     }
 
+    /// A message's References, space-separated bare IDs (replies, section 7).
+    pub async fn message_refs(&self, message_id: MessageId) -> Result<Option<String>> {
+        self.read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT refs FROM messages WHERE id = ?1",
+                [message_id],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+
     /// A message's attachment metadata (section 8: listed without downloading).
     pub async fn list_attachments(&self, message_id: MessageId) -> Result<Vec<AttachmentRecord>> {
         self.read(move |conn| queries::list_attachments(conn, message_id))
@@ -536,6 +549,159 @@ impl Store {
         ids: Vec<String>,
     ) -> Result<Vec<u32>> {
         self.read(move |conn| ops::uids_by_message_id(conn, folder_id, &ids))
+            .await
+    }
+
+    pub async fn insert_outbox(&self, item: NewOutbox) -> Result<OutboxId> {
+        self.write(move |tx| outbox::insert_outbox(tx, &item)).await
+    }
+
+    pub async fn get_outbox(&self, id: OutboxId) -> Result<OutboxItem> {
+        self.read(move |conn| outbox::get_outbox(conn, id)).await
+    }
+
+    pub async fn outbox_raw(&self, id: OutboxId) -> Result<Vec<u8>> {
+        self.read(move |conn| outbox::outbox_raw(conn, id)).await
+    }
+
+    /// An account's outbox, newest first.
+    pub async fn list_outbox(&self, account_id: AccountId) -> Result<Vec<OutboxItem>> {
+        self.read(move |conn| outbox::list_outbox(conn, account_id))
+            .await
+    }
+
+    /// Items due at `now`.
+    pub async fn due_outbox(&self, now: i64) -> Result<Vec<OutboxId>> {
+        self.read(move |conn| outbox::due_outbox(conn, now)).await
+    }
+
+    /// When the next waiting item becomes due.
+    pub async fn next_outbox_due(&self) -> Result<Option<i64>> {
+        self.read(outbox::next_due).await
+    }
+
+    /// Claims a due item for sending: `sending` is durable before any network call.
+    pub async fn claim_outbox(&self, id: OutboxId, now: i64) -> Result<bool> {
+        self.write(move |tx| outbox::claim_outbox(tx, id, now))
+            .await
+    }
+
+    pub async fn set_outbox(
+        &self,
+        id: OutboxId,
+        state: OutboxState,
+        send_after: Option<i64>,
+        attempt: bool,
+        error: Option<String>,
+    ) -> Result<()> {
+        self.write(move |tx| {
+            outbox::set_outbox(tx, id, state, send_after, attempt, error.as_deref())
+        })
+        .await
+    }
+
+    /// Retry a failed or `unknown` item now; `false` in any other state.
+    pub async fn retry_outbox(&self, id: OutboxId, now: i64) -> Result<bool> {
+        self.write(move |tx| outbox::retry_outbox(tx, id, now))
+            .await
+    }
+
+    /// Undo send: removes a still-queued item; `false` once it is being sent.
+    pub async fn undo_outbox(&self, id: OutboxId) -> Result<bool> {
+        self.write(move |tx| outbox::undo_outbox(tx, id)).await
+    }
+
+    pub async fn delete_outbox(&self, id: OutboxId) -> Result<()> {
+        self.write(move |tx| outbox::delete_outbox(tx, id)).await
+    }
+
+    pub async fn clear_outbox_raw(&self, id: OutboxId) -> Result<()> {
+        self.write(move |tx| outbox::clear_outbox_raw(tx, id)).await
+    }
+
+    /// At start: items a crash left `sending` become `unknown` (section 7).
+    pub async fn sending_to_unknown(&self) -> Result<Vec<OutboxId>> {
+        self.write(outbox::sending_to_unknown).await
+    }
+
+    pub async fn outbox_pending(&self) -> Result<u32> {
+        self.read(outbox::outbox_pending).await
+    }
+
+    pub async fn insert_draft(
+        &self,
+        account_id: AccountId,
+        content: serde_json::Value,
+        now: i64,
+    ) -> Result<DraftId> {
+        self.write(move |tx| outbox::insert_draft(tx, account_id, &content, now))
+            .await
+    }
+
+    pub async fn get_draft(&self, id: DraftId) -> Result<Draft> {
+        self.read(move |conn| outbox::get_draft(conn, id)).await
+    }
+
+    pub async fn update_draft(
+        &self,
+        id: DraftId,
+        content: serde_json::Value,
+        now: i64,
+    ) -> Result<()> {
+        self.write(move |tx| outbox::update_draft(tx, id, &content, now))
+            .await
+    }
+
+    pub async fn set_draft_uploaded(&self, id: DraftId, uid: Option<u32>, now: i64) -> Result<()> {
+        self.write(move |tx| outbox::set_draft_uploaded(tx, id, uid, now))
+            .await
+    }
+
+    pub async fn delete_draft(&self, id: DraftId) -> Result<()> {
+        self.write(move |tx| outbox::delete_draft(tx, id)).await
+    }
+
+    pub async fn get_identity(&self, id: IdentityId) -> Result<Identity> {
+        self.read(move |conn| outbox::get_identity(conn, id)).await
+    }
+
+    /// Adds (`id` None) or edits an identity; one default per account (SPEC_GAPS G64).
+    pub async fn save_identity(
+        &self,
+        account_id: AccountId,
+        id: Option<IdentityId>,
+        identity: NewIdentity,
+    ) -> Result<IdentityId> {
+        self.write(move |tx| outbox::save_identity(tx, account_id, id, &identity))
+            .await
+    }
+
+    /// Deletes an identity; never the last one.
+    pub async fn delete_identity(&self, id: IdentityId) -> Result<()> {
+        self.write(move |tx| outbox::delete_identity(tx, id)).await
+    }
+
+    /// Counts `weight` uses of each (address, name) at `at` (section 10).
+    pub async fn bump_contacts(
+        &self,
+        account_id: AccountId,
+        people: Vec<(String, String)>,
+        weight: u32,
+        at: i64,
+    ) -> Result<()> {
+        self.write(move |tx| outbox::bump_contacts(tx, account_id, &people, weight, at))
+            .await
+    }
+
+    /// Autocomplete: up to `limit` contacts starting with `prefix`.
+    pub async fn suggest_contacts(
+        &self,
+        account_id: AccountId,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<Contact>> {
+        let prefix = prefix.to_string();
+        self.read(move |conn| outbox::suggest_contacts(conn, account_id, &prefix, limit))
             .await
     }
 

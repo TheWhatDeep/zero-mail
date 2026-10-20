@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-outbox-undo"
+description = "Enables the outbox_undo command without any pre-configured scope."
+commands.allow = ["outbox_undo"]
+
+[[permission]]
+identifier = "deny-outbox-undo"
+description = "Denies the outbox_undo command without any pre-configured scope."
+commands.deny = ["outbox_undo"]

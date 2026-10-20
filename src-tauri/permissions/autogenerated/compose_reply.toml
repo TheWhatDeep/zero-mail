@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-compose-reply"
+description = "Enables the compose_reply command without any pre-configured scope."
+commands.allow = ["compose_reply"]
+
+[[permission]]
+identifier = "deny-compose-reply"
+description = "Denies the compose_reply command without any pre-configured scope."
+commands.deny = ["compose_reply"]
