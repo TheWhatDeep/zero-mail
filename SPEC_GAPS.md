@@ -478,3 +478,10 @@ The G56 harness passes on the build machine (44 corpus messages opened, zero out
 Options:
 - (a) **Recommended:** a CI-safe harness without DevTools. In the harness only (an environment variable, like perf mode, G49), the page walks every message of the open folder and reports which ones it opened. The corpus beacon host becomes a local HTTP server that the harness runs; anything that leaves the webview (a script, a navigation, an unrewritten URL, a proxied image) reaches it and fails the run. The DevTools harness stays as a local tool.
 - (b) Keep the DevTools harness, run it on the build machine at each milestone and record the result in the report; CI runs the Rust half of T19 only.
+
+## G69. Nothing lists the outbox — Resolved 2026-10-20: option (a), `outbox.list`
+Section 11: a per-account Outbox folder lists failed and `unknown` sends with Retry, Edit and Discard, with a sidebar badge; section 18.3 adds scheduled sends. `list.page` scopes are folder, unified, search and thread, and outbox rows are not messages (they have a state, an error and a send time). No command returns them.
+
+Options:
+- (a) **Recommended:** add `outbox.list {account_id}`, returning each item's id, subject, recipients, state, error, send time and creation time. `outbox-state` events keep it current, and the sidebar badge counts failed and `unknown` items.
+- (b) Add a scope `outbox` to `list.page`, with rows that carry the outbox fields.

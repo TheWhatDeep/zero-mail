@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.15 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.16 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -187,6 +187,7 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `draft.save`, `draft.discard`, `draft.add_attachment`, `draft.remove_attachment`, `draft.apply_template` | draft_id, content | none |
 | `draft.send` | draft_id, identity_id, optional send_at | outbox_id |
 | `outbox.undo`, `outbox.retry`, `outbox.discard` | outbox_id | none |
+| `outbox.list` | account_id | each item's id, subject, recipients, state, error, send time and creation time (SPEC_GAPS G69) |
 | `rules.list`, `rules.save`, `rules.delete`, `rules.reorder`, `rules.run_now` | rule or ids | list |
 | `templates.list`, `templates.save`, `templates.delete` | template | list |
 | `contacts.suggest` | prefix, account_id | up to 10 matches |
@@ -765,6 +766,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.16 | 2026-10-20 | Owner decision (SPEC_GAPS G69): command `outbox.list`. |
 | v0.15 | 2026-10-20 | Owner decisions (SPEC_GAPS G63 to G66, G68): compose windows opened by the app; `identity.list`, `identity.save`, `identity.delete`; the size check when reachable; Sent copy and draft uploads through `ops`; T19's webview half runs as a walk against a local beacon server. |
 | v0.14 | 2026-10-20 | Owner decisions (SPEC_GAPS G58 to G61): event `op-failed`; pending moves and deletes hide rows through bit 5; T25 split between M6 and M9; Gmail Important and Starred start with sync off and hidden. |
 | v0.13 | 2026-10-20 | Owner decisions (SPEC_GAPS G52 to G54, G56): command `link.open`; `plain=1` on `mail-body`; native Save dialogs from Rust, `message.save_source` path optional and built in M5; T19 harness. |
