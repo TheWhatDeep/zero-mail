@@ -547,7 +547,7 @@ None from spec v0.15. v0.13 records the owner's decisions G52–G54 and G56; v0.
 
 Scope: `ops` (flags, move, delete, archive, folders, undo, Gmail quirks) and `folder.extend_window` (G51). Done when: T03, T06, T25 (rows and Archive; the views part moves to M9, G60), T26, T27 and T28.
 
-Every check below passes locally on Windows 10. CI: pending at commit time; recorded when green.
+Every check below passes locally on Windows 10. CI is green on Windows, in the Stalwart job (with the new M6 container test) and in the startup harness ([run 39367163002](https://github.com/TheWhatDeep/zero-mail/actions/runs/39367163002), on the M6 commit plus the docs-only spec v0.16).
 
 ### Built
 - **The pending-op queue (`mail-store`):** each command writes its local change and its `pending_ops` row in one transaction. The local change is an overlay on the rows' flags: a star or read change sets its bit; a pending move, archive or delete sets bit 5, which every view already hides (G59). The flags each row had are saved with the op, so a cancel or a refusal restores exactly the overlay's bits. A server flag pull lays unfinished overlays back on in the same transaction (invariant 2), so a local change never flickers away. Finished moves stay as `done` with their COPYUID for the 10 s Undo window (G62). Ops of one command share an Undo group.
