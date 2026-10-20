@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.13 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.15 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -182,7 +182,8 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `attachment.open`, `attachment.save` | attachment_id, path? (none: native Save dialog, G54) | none |
 | `link.open` | url (`http`, `https` or `tel` only) | none; opens the system browser or handler (SPEC_GAPS G52) |
 | `images.allow_once`, `images.allow_sender` | message_id | none |
-| `compose.new`, `compose.reply`, `compose.reply_all`, `compose.forward` | message_id?, mode | draft_id and prefilled draft |
+| `compose.new`, `compose.reply`, `compose.reply_all`, `compose.forward` | message_id?, mode | draft_id and prefilled draft; the app opens the draft's compose window (SPEC_GAPS G63) |
+| `identity.list`, `identity.save`, `identity.delete` | account_id, identity, identity_id | identities; one default per account, never zero (SPEC_GAPS G64) |
 | `draft.save`, `draft.discard`, `draft.add_attachment`, `draft.remove_attachment`, `draft.apply_template` | draft_id, content | none |
 | `draft.send` | draft_id, identity_id, optional send_at | outbox_id |
 | `outbox.undo`, `outbox.retry`, `outbox.discard` | outbox_id | none |
@@ -205,6 +206,7 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `snooze-due` | account_id, message_id | when a snooze fires |
 | `storage-warning` | kind (disk_full, db_corrupt) | once per incident |
 | `folder-reset` | account_id, folder_id | once, after a UIDVALIDITY purge commits (section 12 toast, SPEC_GAPS G37) |
+| `op-failed` | account_id, op_id, kind, error | once, after a permanently failed op is reverted (section 9, SPEC_GAPS G58) |
 
 ## 4. Data model
 
@@ -221,7 +223,7 @@ folders(id, account_id, path, delimiter, special_use NULL /* inbox sent drafts t
   UNIQUE(account_id, path))
 messages(id, account_id, folder_id, uid, gm_msgid NULL, gm_thrid NULL, message_id, in_reply_to NULL, refs NULL,
   gm_labels_json NULL, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
-  date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted (hidden, SPEC_GAPS G19) */,
+  date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted or pending move/delete (hidden, SPEC_GAPS G19, G59) */,
   has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, UNIQUE(folder_id, uid))
 bodies(message_id, text_plain, text_html, fetched_at)
 attachments(id, message_id, part_id, filename, mime, size, content_id NULL, is_inline)
@@ -329,11 +331,11 @@ Sending is: save to outbox, wait out the undo window, submit via SMTP, upload a 
 - One SMTP session per message. XOAUTH2 tokens are refreshed first.
 - Envelope: `MAIL FROM` is the identity address; `RCPT TO` is To, Cc and Bcc. The Bcc header is never written.
 - If any recipient is rejected permanently, abort before `DATA`, mark `failed` and list the bad addresses. No partial sends.
-- Before queueing, check size against the SMTP `SIZE` limit and IMAP `APPENDLIMIT` and block with a clear message.
+- Before queueing, check size against the SMTP `SIZE` limit and IMAP `APPENDLIMIT` and block with a clear message. When the SMTP server cannot be reached, the message is queued and a later `552` makes it `failed` (SPEC_GAPS G65).
 - Headers set by the client: Message-ID (`<uuid@from-domain>`), Date, From, To, Cc, Reply-To if set, Subject, In-Reply-To and References for replies, MIME-Version, Content-Type. No X-Mailer.
 - Body: `multipart/alternative` (plain and HTML) from the rich text composer, or plain only when the user toggles it. Attachments go in `multipart/mixed`, inline images in `multipart/related`. Non-ASCII headers use RFC 2047, body text UTF-8 quoted-printable, attachments base64.
 
-**Sent copy.** After SMTP accepts, `APPEND` the raw message to the Sent folder with `\Seen`. The `save_sent_copy` setting resolves as: `auto` means off when the server advertises `X-GM-EXT-1` (Gmail files its own copy) and on otherwise; `on` and `off` override. A failed APPEND is retried as an `ops` job and never causes a resend. After a reply or forward, set `\Answered` or `$Forwarded` on the original through `ops`.
+**Sent copy.** After SMTP accepts, `APPEND` the raw message to the Sent folder with `\Seen`. The APPEND, like every draft upload, is an `ops` job the account's actor pushes (SPEC_GAPS G66). The `save_sent_copy` setting resolves as: `auto` means off when the server advertises `X-GM-EXT-1` (Gmail files its own copy) and on otherwise; `on` and `off` override. A failed APPEND is retried as an `ops` job and never causes a resend. After a reply or forward, set `\Answered` or `$Forwarded` on the original through `ops`.
 
 **Drafts.** Autosave to the local `drafts` table 5 s after typing stops. Upload to the IMAP Drafts folder 30 s after the last change and on window close: `APPEND` the new version with `\Draft`, then delete the previously uploaded UID. Sending or discarding deletes the uploaded draft. If the same draft changes elsewhere, last write wins with no merge. Attached files are copied into the app data directory at attach time, so a moved or deleted original cannot break a later send; the copies are removed when the draft is sent or discarded.
 
@@ -401,7 +403,7 @@ Multi-select actions batch UID sets of at most 500 per command.
 
 **Gmail behavior** (when the server advertises `X-GM-EXT-1`)
 
-- `[Gmail]/All Mail` has sync turned off by default, because it duplicates every message. `Important` and `Starred` virtual folders are hidden by default.
+- `[Gmail]/All Mail` has sync turned off by default, because it duplicates every message. `Important` and `Starred` virtual folders are hidden by default: they start with sync off and the sidebar omits them while it is off (SPEC_GAPS G61).
 - Header fetches also request `X-GM-MSGID`, `X-GM-THRID` and `X-GM-LABELS`. A message under two labels is two rows sharing one `gm_msgid`. Unified inbox, search and counts count it once.
 - Archive moves to `[Gmail]/All Mail`, which removes only the INBOX label. Delete moves to `[Gmail]/Trash`. Spam moves to `[Gmail]/Spam`. `\Flagged` is Starred.
 
@@ -577,7 +579,7 @@ Stalwart does not speak Gmail's dialect, so tests that need `X-GM-EXT-1` (T11 se
 | T16 | Send | Attachment over the server's SIZE limit | Blocked before queueing with a clear message. |
 | T17 | Send | Reply-all on a message that includes the user's own alias | Own addresses excluded, no duplicates, In-Reply-To and References correct. |
 | T18 | Send | Type a draft, wait 30 s, open Drafts on another client, edit again | One draft present at all times; old UID removed after each upload. |
-| T19 | Render | XSS corpus: scripts, event handlers, `javascript:` URLs, SVG payloads, CSS `@import`, meta refresh, forms, `base` | No script runs; harness records zero outbound requests (Rust corpus tests plus a WebView2 DevTools harness, SPEC_GAPS G56). |
+| T19 | Render | XSS corpus: scripts, event handlers, `javascript:` URLs, SVG payloads, CSS `@import`, meta refresh, forms, `base` | No script runs; harness records zero outbound requests (Rust corpus tests plus a webview walk against a local beacon server in CI, SPEC_GAPS G56, G68). |
 | T20 | Render | Message with a remote image and a tracking pixel | Nothing fetched until Load images; then fetched via the proxy without cookies or referrer; Always load persists. |
 | T21 | Render | Link text `paypal.com` pointing at another host | Confirmation shows both; cancelling keeps the user in the app. |
 | T22 | Render | Mail in UTF-8, ISO-8859-1, Windows-1252, ISO-2022-JP, GB2312, Shift_JIS and a bogus charset label | All readable or best-effort with no panic. |
@@ -662,10 +664,10 @@ Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mai
 | M3 | `sync`: actors, folder order, folder procedure, IDLE, backoff | T01, T02, T04 (row part, G38), T05 (list part), T07, T08, T09 with actors (G33) |
 | M4 | UI shell, virtualized list, plain-text reader (via `mail-body`, G42), sidebar, status bar, minimal add-account form (G43) | 60 fps scroll on the 50,000-message fixture and the owner's own mail seen once (G41); T04 reading-pane part (G38); startup budget enforced (G44) |
 | M5 | `render`: parser, sanitizer, protocols, attachments; logging and `log.open` (SPEC_GAPS G51); `link.open` and `message.save_source` (G52, G54) | T19 to T24 |
-| M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks; `folder.extend_window` (G51) | T03, T06, T25 to T28 |
+| M6 | `ops`: flags, move, delete, archive, folders, undo, Gmail quirks; `folder.extend_window` (G51) | T03, T06, T25 (rows and Archive, G60), T26 to T28 |
 | M7 | `smtp`, `outbox`, compose window, drafts, identities, contacts | T10 to T18 |
 | M8 | OAuth: Google XOAUTH2 end to end | T31, T32 |
-| M9 | Threading, search, unified inbox, labels, snooze, send later, mute, templates, rules | T29, T30, T36 to T42 |
+| M9 | Threading, search, unified inbox, labels, snooze, send later, mute, templates, rules | T25 (unified, search and thread views, G60), T29, T30, T36 to T42 |
 | M10 | Notifications, tray, shortcuts, settings, onboarding, single instance, unsubscribe, print, image preview | T05 (notification part), T34, T35, T43, T44 |
 | M11 | Error injection, performance pass, accessibility pass, packaging for three OSes | T33 and the full suite green |
 
@@ -763,6 +765,8 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.15 | 2026-10-20 | Owner decisions (SPEC_GAPS G63 to G66, G68): compose windows opened by the app; `identity.list`, `identity.save`, `identity.delete`; the size check when reachable; Sent copy and draft uploads through `ops`; T19's webview half runs as a walk against a local beacon server. |
+| v0.14 | 2026-10-20 | Owner decisions (SPEC_GAPS G58 to G61): event `op-failed`; pending moves and deletes hide rows through bit 5; T25 split between M6 and M9; Gmail Important and Starred start with sync off and hidden. |
 | v0.13 | 2026-10-20 | Owner decisions (SPEC_GAPS G52 to G54, G56): command `link.open`; `plain=1` on `mail-body`; native Save dialogs from Rust, `message.save_source` path optional and built in M5; T19 harness. |
 | v0.12 | 2026-10-20 | Owner ratified G20 to G22, G34, G39, G40, G49 and G50. Logging and `log.open` scheduled in M5, `folder.extend_window` in M6 (SPEC_GAPS G51). |
 | v0.11 | 2026-10-20 | Owner decisions (SPEC_GAPS G41 to G48): M4 done-when (fixture at 60 fps and the owner's own mail once); plain text through `mail-body` from M4; minimal add-account form in M4; startup budget is app cold, OS warm; later-milestone UI hidden until built; `account.list` added; Phosphor icon source; background integrity check. |

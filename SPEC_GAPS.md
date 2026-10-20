@@ -394,3 +394,87 @@ Options:
 - **Link host check:** the visible text "looks like a URL" when it is a bare host, a host with a path, or an `http(s)` URL. The hosts differ when they are not equal after lower-casing and removing one leading `www.`.
 - **Where files go:** logs in `<app data>/logs` (`zeromail.log` plus 4 older files of 2 MB); the attachment cache in `<app data>/attachments` (LRU, 500 MB); opened attachments in `<app data>/tmp/<random>/`, which is emptied at quit and at the next start.
 - **Debug traces:** the switch is the setting `debug_logging` (default off), read at start. The UI for it comes in M10 (G51). IMAP traces redact `LOGIN` and `AUTHENTICATE` arguments, SASL responses, every literal and every quoted string in `FETCH` responses. SMTP traces redact `AUTH` lines and everything between `DATA` and the final `.`.
+
+## G58. How the user hears that a queued action failed — Resolved 2026-10-20: option (a), event `op-failed`
+Section 3 says that on permanent failure `ops` "reverts and emits an event", and section 9 says the user is told. No section 3 event carries it.
+
+Options:
+- (a) **Recommended:** add the event `op-failed {account_id, op_id, kind, error}`, fired once after the revert commits. The UI shows a 10 s toast such as Could not move 3 messages, with the error text.
+- (b) Revert silently; `store-changed` alone brings the row back.
+
+## G59. Hiding a moved or deleted message before the server confirms — Resolved 2026-10-20: option (a), the bit 5 overlay
+A move, archive or delete must leave the list at once (T06), but the server owns the row until it acknowledges. Invariant 2 says `flags` is the server's flags with pending ops laid on top.
+
+Options:
+- (a) **Recommended:** a pending move or delete lays bit 5 (hidden, G19) on its rows, exactly as a pending star lays bit 1. Every view already hides bit 5. Success: the server expunges the source row and the next sync drops it. Failure: the bit comes off and the row is back with its flags. No schema change.
+- (b) Delete the source rows locally and re-fetch their headers if the server refuses.
+
+## G60. T25 before unified inbox, search and threads — Resolved 2026-10-20: option (a), split between M6 and M9
+T25 is in M6's done-when: "Two rows, one entry in unified, search and thread views; Archive removes only the INBOX label." Unified inbox, search and thread views arrive in M9.
+
+Options:
+- (a) **Recommended:** split as G38 did. **M6:** on the Gmail fake, a message under two labels is two rows sharing one `gm_msgid`, and Archive from INBOX leaves the other label's row and its `gm_msgid` alone. **M9:** one entry in unified, search and thread views.
+- (b) Keep T25 whole in M6 and build the counting rules for views that do not exist yet.
+
+## G61. Hiding Gmail's Important and Starred folders — Resolved 2026-10-20: option (a), sync off and hidden
+Section 9: on Gmail, `Important` and `Starred` "are hidden by default". `folders` has no hidden column.
+
+Options:
+- (a) **Recommended:** on accounts with `X-GM-EXT-1`, folders listed with `\Important` or `\Flagged` start with sync off, like All Mail, and the sidebar omits them while their sync is off. The account's folder settings list every folder, so turning sync on shows them.
+- (b) Add a `hidden` column (schema change).
+
+## G62. Small M6 details — Resolved by interpretation (owner to ratify)
+- **Undo after the server acted:** a finished move, archive or delete keeps its `pending_ops` row as `done`, with the `COPYUID` result in `args_json`, for the 10 s Undo window; done rows are not counted as pending and are removed after it. Undo of a queued op deletes the row and lifts its overlay.
+- **One op_id for a selection:** a command over messages in several folders queues one op per folder; they share the first op's id as a group, and `message.undo` reverses the group.
+- **Archive on Gmail** moves to the `\All` folder (`[Gmail]/All Mail`); elsewhere to the `\Archive` folder; with neither, Archive is hidden.
+- **Delete:** the UI asks before a permanent delete (in Trash or Junk, or no Trash folder; Empty Trash shows the count). Core performs what it is asked.
+- **Load older (`folder.extend_window`, G51):** the window's start is the folder's oldest cached INTERNALDATE. A click fetches the 90 days before it; when that finds nothing, it fetches the 90 days before the next older message on the server, so a gap never blocks it.
+- **Read state:** a message shown for 1.5 s is marked `\Seen` through `message.set_flags` (section 8). The setting for immediately or never comes with Settings in M10.
+- **Multi-select:** commands take many messages and batch 500 UIDs per command (section 9). The M6 list keeps single selection; no milestone names a multi-select list UI.
+- **Finding a message again without COPYUID:** Undo searches the destination with `UID SEARCH HEADER Message-ID <id>` (RFC 3501) rather than waiting for a resync of a folder that may not be synced. `SearchKey` gains `Header`.
+- **Folder ops and LIST:** folder ops are pushed before the session's first `LIST`, and a `LIST` never drops a folder with an unacknowledged create or rename, nor brings back one with an unacknowledged delete. The local change and its op are written in one transaction.
+- **Flag pulls:** a server flag pull and the re-laying of pending overlays happen in one transaction, so a reader never sees a local star or read state flicker away.
+- **Which folders G61 hides:** `folders` keeps no LIST attributes, so the sidebar hides a folder whose sync is off, which has no role, and whose path is under Gmail's system container (`[Gmail]/` or `[Google Mail]/`). On Gmail those are exactly Important and Starred.
+- **Undo of a star or read change:** `message.set_flags` also returns an op_id; Undo of a finished one queues the opposite change. No toast offers it (section 9 lists archive, delete and move), but the command accepts it.
+
+## G63. Who opens a compose window — Resolved 2026-10-20: option (a), the app opens it from Rust
+Section 11 gives each draft its own window. Section 13.3 lets the page call only the app's own commands, so the page may not create windows itself.
+
+Options:
+- (a) **Recommended:** `compose.new`, `compose.reply`, `compose.reply_all` and `compose.forward` create the draft and the app opens its window from Rust (label `compose-<draft_id>`, the same UI on a compose route). The capability file covers `main` and `compose-*` windows with the same command list. Closing the window uploads the draft (section 7).
+- (b) Compose opens inside the main window (an overlay or a pane) in M7; separate windows come later.
+
+## G64. Identities and signatures have no commands — Resolved 2026-10-20: option (a), `identity.*` commands
+M7 builds identities: section 5 says every account has at least one identity and extra send-as addresses are typed in by hand, and section 11's compose has an identity picker. Section 3 has no command to list, add or remove identities, and none that edits `accounts.signature_html` and `signature_text`.
+
+Options:
+- (a) **Recommended:** add `identity.list {account_id}`, `identity.save {identity}` (add or edit; one default per account) and `identity.delete {identity_id}` (never the last one). Signatures become fields of `account.update`'s config. The Settings screens that edit them arrive in M10; M7 shows the picker and a small identities list in the account settings.
+- (b) Read identities only through the compose commands' response, and edit them through `settings.set` from M10.
+
+## G65. The size check when the server cannot be asked — Resolved 2026-10-20: option (a), check when reachable
+Section 7: before queueing, check the size against SMTP `SIZE` and IMAP `APPENDLIMIT` and block with a clear message. Neither limit is stored, and offline neither server can be asked. Compose and send must work offline (section 6).
+
+Options:
+- (a) **Recommended:** `draft.send` asks the SMTP server (`EHLO`, then `QUIT`, under the normal timeout) and uses the IMAP `APPENDLIMIT` the account's actor last saw. Over a limit: `too_large`, nothing queued. Server unreachable: the message is queued, and a later `552` makes it `failed` with `too_large`.
+- (b) Never queue without a successful size check: offline sends are refused.
+
+## G66. How the Sent copy and draft uploads reach IMAP — Resolved 2026-10-20: option (a), through `ops`
+Section 7: the outbox APPENDs the Sent copy and uploads drafts; "a failed APPEND is retried as an ops job". Section 6 caps an account at 5 IMAP connections, all owned by its actor, and `outbox` may not call `auth` for credentials.
+
+Options:
+- (a) **Recommended:** both always go through `ops`: the outbox queues a `pending_ops` row (`append` with the outbox id, or `draft_replace` with the draft id and the UID to remove) and the actor pushes it on its worker connection. Retries, offline and the connection cap are then the existing ops machinery. `outbox` itself only speaks SMTP.
+- (b) The outbox opens its own short-lived IMAP connection per APPEND with credentials Core hands it, falling back to an ops job when that fails.
+
+## G67. Small M7 details — Resolved by interpretation (owner to ratify)
+- **Quoting:** replies and inline forwards quote the original's plain text, HTML-escaped, in a `<blockquote>`, under `On <local date>, <name> <address> wrote:` (or the forwarded header block). The original's HTML never enters the compose window, so no hostile markup reaches an unsandboxed page.
+- **Rich text:** the composer is a `contenteditable` with bold, italic, underline, lists and links, no UI kit. Its HTML goes through the same `ammonia` allowlist before the message is built.
+- **Contacts:** every From, To and Cc of synced mail counts 1 use; every recipient of a sent message counts 3 (section 10: sent addresses weigh more). Suggestions rank by use count, then recency, at most 10.
+- **Undo window:** 10 s until the setting arrives with Settings (M10). Send later (section 18.3) is M9.
+- **Retry schedule:** `retry_wait` waits 30 s, 2 min, 10 min, then 1 h for every later attempt, and the sixth failed attempt is `failed` (section 7).
+
+## G68. The T19 WebView2 harness cannot open DevTools on CI — Resolved 2026-10-20: option (a), a CI-safe walk with a local beacon server
+The G56 harness passes on the build machine (44 corpus messages opened, zero outbound requests), but on GitHub's `windows-2025` runner WebView2 never opens the DevTools port: not with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, not with its own profile folder, not with WebView2's per-app registry override. The app runs and WebView2 starts; no policy is set on the runner.
+
+Options:
+- (a) **Recommended:** a CI-safe harness without DevTools. In the harness only (an environment variable, like perf mode, G49), the page walks every message of the open folder and reports which ones it opened. The corpus beacon host becomes a local HTTP server that the harness runs; anything that leaves the webview (a script, a navigation, an unrewritten URL, a proxied image) reaches it and fails the run. The DevTools harness stays as a local tool.
+- (b) Keep the DevTools harness, run it on the build machine at each milestone and record the result in the report; CI runs the Rust half of T19 only.
