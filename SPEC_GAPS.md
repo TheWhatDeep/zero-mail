@@ -534,3 +534,20 @@ Options:
 - **Editing a Google account:** the edit saves without a test, because the next sign-in tests it. Empty client fields keep the saved ID and secret. The sign-in method cannot change on an existing account.
 - **The setup form:** when the host offers both, a Sign-in method choice, Google first (section 5, step 3). A Workspace domain resolves to nothing (no autoconfig, and no MX guess, G27), so the manual form offers the choice by the typed IMAP host, as `auth_methods` does: Google hosts get both methods. Google sign-in shows the client ID and secret fields in place of the password, and Save and sign in with Google in place of Test and Save.
 - **Fakes:** the fake IMAP and SMTP servers record each login's mechanism (`password` or `xoauth2`, never the secret), so tests can tell XOAUTH2 was used.
+
+## G73. Zero Mail becomes a public app — Resolved 2026-10-20: public app, new M11
+The owner wants a public app: anyone enters their address and uses it, whatever their mail server. The spec assumes personal use: assumption 3 says no public release and a bring-your-own Google client. These parts change:
+- **Sign-in per provider:**
+  - Generic IMAP/SMTP with an app password works today (Fastmail, iCloud, Yahoo, self-hosted, and Google with an app password).
+  - Google sign-in for everyone needs one Zero Mail client shipped in the app. That breaks section 5's "ships no client IDs or secrets". The mail scope is restricted, so Google must verify the app: privacy policy, verified domain and possibly a yearly third-party security assessment. Until then, External testing mode allows 100 named users with weekly re-sign-in.
+  - Microsoft 365 and Outlook.com require OAuth for IMAP and SMTP. They are a non-goal (section 1, v0.3). "Regardless of server" brings them back: an Azure app registration and Microsoft OAuth endpoints (section 13 network allowlist).
+- **Server discovery:** custom domains hosted by Google or Microsoft (for example circuitry.digital) find no settings, because the MX guess was dropped (G27). A public app needs it back, through a DNS crate or a lookup service.
+- **Distribution (M11):** signed installers (Windows code signing, Apple notarization), a releases page, and updates (assumption 12: manual).
+- **What stays:** the architecture, the local-only data, no telemetry, and the security layers.
+
+The owner decided:
+- **Google:** Zero Mail ships one Google client and goes through Google's verification. Until approval: testing mode for up to 100 users, plus app passwords. The bring-your-own client stays available.
+- **Microsoft:** Microsoft 365 and Outlook.com come back through Microsoft OAuth, in a new milestone that reuses M8's OAuth machinery.
+- **Order:** M8 is tagged after T31 and T32 with the owner's own client; the token code is the same for a shipped client. M9 and M10 are built as specified. A new **M11, Public release**, holds the shipped Google client, Microsoft OAuth, MX discovery for custom domains, and the update path. Its scope is written into the spec before it starts. Packaging moves to **M12**.
+- **Earlier references:** "M11" in entries written before v0.18 (G24, G25, G27) means the packaging milestone, now M12. G24's question about macOS and Linux targets, and G25's manual test round, are decided at M12.
+

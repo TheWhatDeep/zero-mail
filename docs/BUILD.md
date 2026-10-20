@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.17 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.18 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -71,7 +71,7 @@ When done: run the full test suite, write the milestone report to docs/REPORTS.m
 
 ## A6. Definition of complete
 
-The build is complete when M11 is tagged, every automated test in section 15 passes in CI on all three OSes, every manual test in `docs/MANUAL_TESTS.md` has been run by the owner, every section 14 budget is met on the reference dataset, and the owner has used the app as his daily Workspace client for one week with no lost mail and no duplicate sends.
+The build is complete when M12 is tagged, every automated test in section 15 passes in CI on all three OSes, every manual test in `docs/MANUAL_TESTS.md` has been run by the owner, every section 14 budget is met on the reference dataset, and the owner has used the app as his daily Workspace client for one week with no lost mail and no duplicate sends.
 
 ---
 
@@ -89,7 +89,7 @@ A fast, small desktop email client for any IMAP/SMTP account, with offline readi
 4. Generic IMAP/SMTP first. No provider API (Gmail API, Graph) anywhere. The login method is chosen by host (OAuth for Google); every other provider quirk is detected by server capability, never by domain name.
 5. Lightweight is a feature with budgets (section 14). A feature that breaks a budget is redesigned or rejected.
 
-**Non-goals.** Calendar and contacts sync, PGP/S-MIME, Exchange ActiveSync/MAPI/JMAP, Microsoft 365 and Outlook.com accounts (Microsoft requires OAuth for IMAP, and Microsoft OAuth is out of scope), mobile apps, running a mail server (the client treats a self-hosted server as just another account), AI features, plugins, telemetry or crash reporting, and any hosted backend.
+**Non-goals.** Calendar and contacts sync, PGP/S-MIME, Exchange ActiveSync/MAPI/JMAP, mobile apps, running a mail server (the client treats a self-hosted server as just another account), AI features, plugins, telemetry or crash reporting, and any hosted backend. Microsoft 365 and Outlook.com accounts were a non-goal until v0.18; they return through Microsoft OAuth in M11 (SPEC_GAPS G73).
 
 **Done means:** the author uses it as the daily Workspace client for a week with no lost mail, no duplicate sends, and every budget in section 14 met.
 
@@ -655,7 +655,7 @@ This section is addressed to the AI agent that builds the app. Follow the spec e
 
 Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mail-imap`, `mail-store` and `mail-auth` and nothing else, and so on down the table in section 3. `src-tauri` depends only on `mail-core`.
 
-**Build order.** These are internal checkpoints, not releases. Nothing ships until M11 passes.
+**Build order.** These are internal checkpoints, not releases. Nothing ships until M12 passes. M11 was inserted in v0.18 (SPEC_GAPS G73): references to M11 written before v0.18 mean the packaging milestone, now M12.
 
 | M | Builds | Done when |
 | --- | --- | --- |
@@ -670,7 +670,8 @@ Dependency direction is enforced in `Cargo.toml`: `mail-sync` may depend on `mai
 | M8 | OAuth: Google XOAUTH2 end to end | T31, T32 |
 | M9 | Threading, search, unified inbox, labels, snooze, send later, mute, templates, rules | T25 (unified, search and thread views, G60), T29, T30, T36 to T42 |
 | M10 | Notifications, tray, shortcuts, settings, onboarding, single instance, unsubscribe, print, image preview | T05 (notification part), T34, T35, T43, T44 |
-| M11 | Error injection, performance pass, accessibility pass, packaging for three OSes | T33 and the full suite green |
+| M11 | Public release: Zero Mail's own verified Google client, Microsoft 365 and Outlook.com through Microsoft OAuth, server discovery for custom domains (MX), and the update path. Its exact scope is specified in this file before it starts (SPEC_GAPS G73) | To be specified before M11 starts |
+| M12 | Error injection, performance pass, accessibility pass, packaging for three OSes | T33 and the full suite green |
 
 ## 17. Assumptions and open question
 
@@ -680,7 +681,7 @@ Thirteen assumptions fill gaps the owner had not answered. Status is tracked in 
 | --- | --- |
 | 1 | Target OSes: Windows, macOS and Linux. |
 | 2 | Frontend: Svelte 5 with TypeScript. |
-| 3 | Distribution: personal use, bring-your-own Google OAuth client ID, no public release. |
+| 3 | Distribution: a public app that anyone can use with their own mail server. Zero Mail ships its own verified Google client, and from M11 a Microsoft one; a bring-your-own Google client stays available (amended v0.18, SPEC_GAPS G73). |
 | 4 | Initial sync window of 90 days; older mail loads on demand. |
 | 5 | Raw message source is not stored; only parsed parts, with attachments fetched on demand. |
 | 6 | Threading by headers only; Gmail uses `X-GM-THRID`. |
@@ -766,6 +767,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.18 | 2026-10-20 | Owner decision (SPEC_GAPS G73): Zero Mail becomes a public app. A verified Google client shipped with the app, Microsoft 365 and Outlook.com through Microsoft OAuth, and MX discovery go into a new M11; packaging becomes M12. M8 to M10 continue as specified. |
 | v0.17 | 2026-10-20 | Owner decisions (SPEC_GAPS G23, G70, G71): `bcc:` through local Bcc lists; the Google client secret in the keychain; OAuth accounts are saved, then signed in. |
 | v0.16 | 2026-10-20 | Owner decision (SPEC_GAPS G69): command `outbox.list`. |
 | v0.15 | 2026-10-20 | Owner decisions (SPEC_GAPS G63 to G66, G68): compose windows opened by the app; `identity.list`, `identity.save`, `identity.delete`; the size check when reachable; Sent copy and draft uploads through `ops`; T19's webview half runs as a walk against a local beacon server. |
