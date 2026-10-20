@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.18 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.19 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -221,9 +221,10 @@ accounts(id, name, email, imap_host, imap_port, imap_security, smtp_host, smtp_p
 identities(id, account_id, name, address, reply_to NULL, is_default)
 folders(id, account_id, path, delimiter, special_use NULL /* inbox sent drafts trash junk archive all */,
   uidvalidity, uidnext, highestmodseq NULL, sync_enabled, watch_idle, unread, total, synced_at,
+  window_start /* sync window start, UTC; older stored messages are outside the window, SPEC_GAPS G75 */,
   UNIQUE(account_id, path))
 messages(id, account_id, folder_id, uid, gm_msgid NULL, gm_thrid NULL, message_id, in_reply_to NULL, refs NULL,
-  gm_labels_json NULL, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
+  gm_labels_json NULL, list_id NULL /* SPEC_GAPS G76 */, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
   date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted or pending move/delete (hidden, SPEC_GAPS G19, G59) */,
   has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, UNIQUE(folder_id, uid))
 bodies(message_id, text_plain, text_html, fetched_at)
@@ -233,6 +234,7 @@ outbox(id, account_id, identity_id, raw_mime, envelope_json, state, send_after_u
   created_at)
 pending_ops(id, account_id, folder_id, uids_json, kind, args_json, state, attempts, last_error, created_at)
 drafts(id, account_id, imap_uid NULL, content_json, updated_at, uploaded_at NULL)
+message_refs(account_id, ref, message_id)  -- each message's own ID, In-Reply-To and References, for threading (SPEC_GAPS G74)
 contacts(account_id, address, name, last_used_utc, use_count)
 remote_image_allow(account_id, sender_addr)
 snoozes(message_id, account_id, due_utc, origin_folder_id)
@@ -767,6 +769,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.19 | 2026-10-20 | Owner decisions (SPEC_GAPS G74 to G76): table `message_refs` for threading; column `folders.window_start` for the sync window; column `messages.list_id` for rules. |
 | v0.18 | 2026-10-20 | Owner decision (SPEC_GAPS G73): Zero Mail becomes a public app. A verified Google client shipped with the app, Microsoft 365 and Outlook.com through Microsoft OAuth, and MX discovery go into a new M11; packaging becomes M12. M8 to M10 continue as specified. |
 | v0.17 | 2026-10-20 | Owner decisions (SPEC_GAPS G23, G70, G71): `bcc:` through local Bcc lists; the Google client secret in the keychain; OAuth accounts are saved, then signed in. |
 | v0.16 | 2026-10-20 | Owner decision (SPEC_GAPS G69): command `outbox.list`. |

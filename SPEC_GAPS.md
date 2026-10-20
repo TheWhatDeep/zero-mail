@@ -551,3 +551,45 @@ The owner decided:
 - **Order:** M8 is tagged after T31 and T32 with the owner's own client; the token code is the same for a shipped client. M9 and M10 are built as specified. A new **M11, Public release**, holds the shipped Google client, Microsoft OAuth, MX discovery for custom domains, and the update path. Its scope is written into the spec before it starts. Packaging moves to **M12**.
 - **Earlier references:** "M11" in entries written before v0.18 (G24, G25, G27) means the packaging milestone, now M12. G24's question about macOS and Linux targets, and G25's manual test round, are decided at M12.
 
+## G74. Finding a thread through References needs an index — Resolved 2026-10-20: option (a), `message_refs`
+Section 10 threads messages by union-find: two messages share a thread if they share any ID in their Message-ID, In-Reply-To and References. T29 needs out-of-order replies and a missing middle message to join. Example: C (References A and B, In-Reply-To B) arrives before A, and B never arrives. When A arrives, the only link is that C's References contain A.
+- `refs` is a space-separated text column, so "which stored messages reference this ID" is a full scan of the account per new message. With 100,000 messages a first sync would scan billions of rows.
+
+Options:
+- (a) **Recommended:** a new table `message_refs(account_id, ref, message_id)`, indexed on `(account_id, ref)`, holding each message's own ID, In-Reply-To and References. Rows cascade with their message. Each new message then costs a few index lookups. One table, written by the store in the same transaction as the message.
+- (b) No schema change. Sync keeps an in-memory map from every ID to its thread, built from the store when the actor starts (a background read of the account; tens of MB at 100,000 messages).
+- (c) A `LIKE` scan of `refs` per new message (no schema change; too slow for the section 14 budgets).
+
+## G75. Server-search hits "marked as outside the sync window" — Resolved 2026-10-20: option (a), `folders.window_start`
+Section 10: hits not in the cache "are header-fetched into the store, marked as outside the sync window, then listed". No column holds that mark. It matters because Load older starts at the folder's oldest cached message (G62). Without a mark, a 5-year-old hit moves the window start back 5 years, and Load older skips everything between.
+
+Options:
+- (a) **Recommended:** a new column `folders.window_start` (UTC seconds, 0 until the first sync). The first sync sets it to now minus `sync_days`, and Load older moves it back 90 days per click. A stored message older than it is outside the sync window. It is listed and searchable but not counted by Load older. One column, no per-message mark.
+- (b) No schema change: keep each folder's window start in `settings` under a per-folder key.
+- (c) A per-message mark: a flags bit 6. The `flags` CHECK allows bits 0 to 5 only, so this means a table rebuild.
+
+## G76. Rules need List-Id, which is not stored — Resolved 2026-10-20: option (a), `messages.list_id`
+Section 18.6 rule conditions include `list-id`. Sync already fetches the List-Id header (with List-Unsubscribe and List-Unsubscribe-Post) but stores none of them. Rules with a body condition wait for the body prefetch, so the header must still be known later.
+
+Options:
+- (a) **Recommended:** a new nullable column `messages.list_id`, filled at header fetch. The List-Unsubscribe headers are M10's question (section 18.7).
+- (b) Evaluate `list-id` only while the headers are in memory during sync. A rule that combines `list-id` with a body condition fetches the List-Id header again when the body arrives.
+- (c) Drop `list-id` from the conditions.
+
+## G77. M9 plan details — Resolved by interpretation (owner to ratify)
+- **Where the rules engine lives:** section 3 has no rules module. Rules and mute run in `mail-sync` (`sync` and `ops` are one crate), after each sync of INBOX or a watched folder, and their actions are ordinary `ops`. Core owns the snooze and send-later timers, like the outbox runner.
+- **Once per message across Undo (T40):** a rule's move gives the message a new row in each folder, and `rules_applied` cascades with the old row. When the user undoes a rule's move, Core remembers that message's Message-ID. The returning INBOX row gets `rules_applied` entries instead of running the rules again. The memory lasts an hour and is lost on restart.
+- **Snooze:**
+  - The `Snoozed` folder is created on first use; its path is the setting `snooze.folder`.
+  - The snooze row points at the source row until the move runs. The move's executor then header-fetches the copy in `Snoozed` and re-points the row in the same transaction.
+  - At the due time the app queues `-\Seen` and a move back to the origin folder, or to INBOX when the origin is gone (G22), then fires `snooze-due`. The OS notification is M10 (T37's notification part, as G38 split T04).
+  - A reply in a snoozed thread ends the snooze early (setting `snooze.end_on_reply`, default on).
+- **Send later (18.3):**
+  - Cancel is `outbox.undo` (back to the draft).
+  - Send now is `outbox.retry` on a queued item, which sets its send time to now.
+  - An item sent more than 60 s after its send time is marked late, and `outbox.list` returns a `late` flag. The Outbox view shows sent history with Sent late.
+- **Templates:** `draft.apply_template {draft_id, template_id}` fills an empty subject, saves the draft, and returns the template's sanitized HTML and text. The compose window inserts that body at the cursor (T41). Save as template stores the draft's subject and bodies.
+- **Mute:** `$Muted` is set where PERMANENTFLAGS include `\*`. A muted thread's new INBOX messages are archived by the rules engine. The no-notification half is M10's (T39).
+- **Thread view:** `list.page` with scope thread takes the current folder too, for the Trash, Junk and Drafts rule (section 10, step 6).
+- **Settings without a screen:** subject grouping (`threads.subject_merge`, default off), Group by conversation, and the snooze settings are setting keys now. Their switches come with Settings in M10. The Rules and Templates management screens are M10 too (section 11, Settings). M9's UI covers: search, All Inboxes, threads, labels, snooze (picker and Snoozed view), Send later and Outbox history, mute, Insert and Save template in compose, and Block sender in the reader.
+
