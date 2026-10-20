@@ -71,6 +71,14 @@ pub(crate) async fn sync_folder_list<T: ImapTransport>(
     Ok(after)
 }
 
+/// The `$Muted` keyword (section 18.5).
+fn is_muted_keyword(f: &mail_imap::Flag) -> bool {
+    matches!(f, mail_imap::Flag::Keyword(k) if k.eq_ignore_ascii_case(MUTED_KEYWORD))
+}
+
+/// Set on a muted thread's messages where the server stores keywords (section 18.5).
+pub const MUTED_KEYWORD: &str = "$Muted";
+
 /// Gmail's `\Important` and `\Flagged` (Starred) folders.
 fn gmail_virtual(f: &mail_imap::MailboxInfo) -> bool {
     f.attributes
@@ -154,6 +162,7 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
     let total = missing.len();
     let gmail = ctx.caps.gmail;
     let mut fetched = 0;
+    let mut arrived = Vec::new();
     for batch in missing.chunks(FETCH_BATCH) {
         let headers = t
             .uid_fetch_headers(&UidSet::new(batch.iter().copied()), HeaderFetch { gmail })
@@ -163,7 +172,18 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
             .map(|h| convert::new_message(h, ctx.account_id, folder_id, now(), gmail))
             .collect();
         if !rows.is_empty() {
-            store.insert_synced(folder_id, rows).await?;
+            let ids = store.insert_synced(folder_id, rows).await?;
+            // Another install of this app muted the thread (section 18.5).
+            let muted: Vec<_> = headers
+                .iter()
+                .zip(&ids)
+                .filter(|(h, _)| h.flags.iter().any(is_muted_keyword))
+                .map(|(_, id)| *id)
+                .collect();
+            if !muted.is_empty() {
+                store.mute_threads_of(ctx.account_id, muted).await?;
+            }
+            arrived.extend(ids);
         }
         fetched += batch.len();
         ctx.events.send(SyncEvent::StoreChanged {
@@ -245,6 +265,13 @@ pub(crate) async fn sync_folder<T: ImapTransport>(
         account_id: ctx.account_id,
         folder_id: Some(folder_id),
     });
+    if !first && !arrived.is_empty() {
+        ctx.events.send(SyncEvent::NewMail {
+            account_id: ctx.account_id,
+            folder_id,
+            message_ids: arrived,
+        });
+    }
     Ok(follow
         .sync
         .into_iter()

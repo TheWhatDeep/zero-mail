@@ -352,6 +352,29 @@ pub struct MessageView {
     pub can_archive: bool,
     /// Delete here is permanent and asks first (section 9).
     pub delete_is_permanent: bool,
+    /// Gmail only (section 18.1): one chip per label; `None` elsewhere, and the label UI
+    /// is hidden.
+    pub labels: Option<Vec<LabelView>>,
+    /// Gmail's `\Important`, shown as a read-only badge.
+    pub important: bool,
+}
+
+/// A folder's display name: Inbox, or the last segment of its path.
+pub fn folder_name(f: &Folder) -> String {
+    if f.special_use == Some(SpecialUse::Inbox) {
+        return "Inbox".into();
+    }
+    match f.delimiter.as_str() {
+        "" => f.path.clone(),
+        d => f.path.rsplit(d).next().unwrap_or(&f.path).to_string(),
+    }
+}
+
+/// A label chip: the folder the label is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LabelView {
+    pub folder_id: i64,
+    pub name: String,
 }
 
 pub fn message_view(
@@ -398,6 +421,8 @@ pub fn message_view(
         remote_images: body.remote_images,
         can_archive: body.can_archive,
         delete_is_permanent: body.delete_is_permanent,
+        labels: None,
+        important: false,
     }
 }
 

@@ -40,6 +40,10 @@ pub struct Timing {
     pub draft_upload: Duration,
     /// How often the outbox runner looks for due items.
     pub outbox_tick: Duration,
+    /// A scheduled send this late is marked Sent late (section 18.3; SPEC_GAPS G77).
+    pub late_after: Duration,
+    /// How often due snoozes are looked for (section 18.2: within 10 s of a start).
+    pub snooze_tick: Duration,
 }
 
 impl Default for Timing {
@@ -48,6 +52,8 @@ impl Default for Timing {
             undo_window: Duration::from_secs(10),
             draft_upload: Duration::from_secs(30),
             outbox_tick: Duration::from_secs(1),
+            late_after: Duration::from_secs(60),
+            snooze_tick: Duration::from_secs(5),
         }
     }
 }
@@ -145,6 +151,8 @@ pub struct OutboxView {
     pub send_after_utc: i64,
     pub created_at: i64,
     pub draft_id: Option<DraftId>,
+    /// Sent late: missed while the app was closed (section 18.3).
+    pub late: bool,
 }
 
 /// Prefixes that never stack (section 7).
@@ -930,6 +938,7 @@ where
 
     /// `outbox.list` (SPEC_GAPS G69).
     pub async fn outbox_list(&self, account_id: AccountId) -> Result<Vec<OutboxView>, AppError> {
+        let late_after = i64::try_from(self.timing().late_after.as_secs()).unwrap_or(60);
         Ok(self
             .store
             .list_outbox(account_id)
@@ -956,6 +965,12 @@ where
                 send_after_utc: o.send_after_utc,
                 created_at: o.created_at,
                 draft_id: o.envelope["draft_id"].as_i64(),
+                // Sent late (section 18.3): handed to SMTP well after its time, as when the
+                // app was closed when it came due.
+                late: o.state == OutboxState::Sent
+                    && o.envelope["sent_at"]
+                        .as_i64()
+                        .is_some_and(|at| at - o.send_after_utc > late_after),
             })
             .collect())
     }
@@ -1018,6 +1033,7 @@ where
             state: state_name(state),
         });
         if state == OutboxState::Sent {
+            self.store.mark_sent_at(id, now).await?;
             self.after_sent(&item).await?;
         }
         self.emit_pending().await;

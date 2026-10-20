@@ -335,6 +335,7 @@ async fn m7_to_cc_bcc_each_once_and_one_sent_copy() {
         undo_window: Duration::ZERO,
         draft_upload: Duration::from_secs(3600),
         outbox_tick: Duration::from_millis(200),
+        ..Timing::default()
     });
     let mut c = config("alice", "alice-test-pw", false);
     c.pinned_cert_sha256 = Some(pin_hex);

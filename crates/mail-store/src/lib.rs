@@ -7,6 +7,7 @@
 //! never see SQL or a connection.
 
 mod error;
+mod features;
 mod ops;
 mod outbox;
 mod queries;
@@ -732,6 +733,165 @@ impl Store {
         limit: u32,
     ) -> Result<Page> {
         self.read(move |conn| queries::folder_page(conn, folder_id, cursor, limit))
+            .await
+    }
+
+    /// Mutes a thread (section 18.5).
+    pub async fn mute_thread(&self, account: AccountId, thread: ThreadId) -> Result<()> {
+        self.write(move |tx| features::mute_thread(tx, account, thread))
+            .await
+    }
+
+    /// Unmutes a thread; nothing is un-archived.
+    pub async fn unmute_thread(&self, account: AccountId, thread: ThreadId) -> Result<()> {
+        self.write(move |tx| features::unmute_thread(tx, account, thread))
+            .await
+    }
+
+    /// Mutes the threads of these messages (`$Muted` seen on the server).
+    pub async fn mute_threads_of(
+        &self,
+        account: AccountId,
+        messages: Vec<MessageId>,
+    ) -> Result<()> {
+        self.write(move |tx| features::mute_threads_of(tx, account, &messages))
+            .await
+    }
+
+    /// Whether a thread is muted.
+    pub async fn thread_muted(&self, thread: ThreadId) -> Result<bool> {
+        self.read(move |conn| features::thread_muted(conn, thread))
+            .await
+    }
+
+    /// Every visible row of a thread.
+    pub async fn thread_copies(&self, thread: ThreadId) -> Result<Vec<MessageCopy>> {
+        self.read(move |conn| features::thread_copies(conn, thread))
+            .await
+    }
+
+    /// Records a snooze (section 18.2).
+    pub async fn add_snooze(&self, snooze: Snooze) -> Result<()> {
+        self.write(move |tx| features::add_snooze(tx, &snooze))
+            .await
+    }
+
+    /// Snoozes due at `now`, oldest first.
+    pub async fn due_snoozes(&self, now: i64) -> Result<Vec<Snooze>> {
+        self.read(move |conn| features::due_snoozes(conn, now))
+            .await
+    }
+
+    /// A message's snooze.
+    pub async fn get_snooze(&self, message: MessageId) -> Result<Option<Snooze>> {
+        self.read(move |conn| features::get_snooze(conn, message))
+            .await
+    }
+
+    /// Snoozes on a thread's messages.
+    pub async fn thread_snoozes(&self, thread: ThreadId) -> Result<Vec<Snooze>> {
+        self.read(move |conn| features::thread_snoozes(conn, thread))
+            .await
+    }
+
+    /// Removes a snooze; `false` when already gone.
+    pub async fn delete_snooze(&self, message: MessageId) -> Result<bool> {
+        self.write(move |tx| features::delete_snooze(tx, message))
+            .await
+    }
+
+    /// A snoozed message moved: its snooze follows the new row.
+    pub async fn repoint_snooze(&self, from: MessageId, to: MessageId) -> Result<()> {
+        self.write(move |tx| features::repoint_snooze(tx, from, to))
+            .await
+    }
+
+    /// A visible row of a folder by Message-ID.
+    pub async fn find_by_message_id(
+        &self,
+        folder: FolderId,
+        message_id: String,
+    ) -> Result<Option<MessageId>> {
+        self.read(move |conn| features::find_by_message_id(conn, folder, &message_id))
+            .await
+    }
+
+    /// What rule conditions test, per message (section 18.6).
+    pub async fn rule_facts(&self, ids: Vec<MessageId>) -> Result<Vec<RuleFacts>> {
+        self.read(move |conn| features::rule_facts(conn, &ids))
+            .await
+    }
+
+    /// Every rule, in order (section 18.6).
+    pub async fn list_rules(&self) -> Result<Vec<RuleRecord>> {
+        self.read(features::list_rules).await
+    }
+
+    /// Adds (id 0) or replaces a rule; returns its id.
+    pub async fn save_rule(&self, rule: RuleRecord) -> Result<i64> {
+        self.write(move |tx| features::save_rule(tx, &rule)).await
+    }
+
+    /// Deletes a rule.
+    pub async fn delete_rule(&self, id: i64) -> Result<()> {
+        self.write(move |tx| features::delete_rule(tx, id)).await
+    }
+
+    /// Puts rules in this order.
+    pub async fn reorder_rules(&self, ids: Vec<i64>) -> Result<()> {
+        self.write(move |tx| features::reorder_rules(tx, &ids))
+            .await
+    }
+
+    /// The rules that already ran on a message.
+    pub async fn rules_applied(&self, message: MessageId) -> Result<Vec<i64>> {
+        self.read(move |conn| features::rules_applied(conn, message))
+            .await
+    }
+
+    /// Records rules that ran, so they never run again (section 18.6).
+    pub async fn mark_rules_applied(&self, marks: Vec<(MessageId, i64)>) -> Result<()> {
+        self.write(move |tx| features::mark_rules_applied(tx, &marks))
+            .await
+    }
+
+    /// Every template, by name (section 18.4).
+    pub async fn list_templates(&self) -> Result<Vec<TemplateRecord>> {
+        self.read(features::list_templates).await
+    }
+
+    /// One template.
+    pub async fn get_template(&self, id: i64) -> Result<TemplateRecord> {
+        self.read(move |conn| features::get_template(conn, id))
+            .await
+    }
+
+    /// Adds (id 0) or replaces a template; returns its id.
+    pub async fn save_template(&self, template: TemplateRecord) -> Result<i64> {
+        self.write(move |tx| features::save_template(tx, &template))
+            .await
+    }
+
+    /// Deletes a template.
+    pub async fn delete_template(&self, id: i64) -> Result<()> {
+        self.write(move |tx| features::delete_template(tx, id))
+            .await
+    }
+
+    /// Records when an outbox item was sent (Sent late, section 18.3).
+    pub async fn mark_sent_at(&self, id: OutboxId, at: i64) -> Result<()> {
+        self.write(move |tx| features::mark_sent_at(tx, id, at))
+            .await
+    }
+
+    /// The visible rows of the same Gmail message, one per label, itself included.
+    pub async fn copies(&self, message: MessageId) -> Result<Vec<MessageCopy>> {
+        self.read(move |conn| queries::copies(conn, message)).await
+    }
+
+    /// A message's stored `X-GM-LABELS`; `None` when not Gmail.
+    pub async fn gm_labels(&self, message: MessageId) -> Result<Option<Vec<String>>> {
+        self.read(move |conn| queries::gm_labels(conn, message))
             .await
     }
 

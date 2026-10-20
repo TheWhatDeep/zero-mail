@@ -128,12 +128,12 @@ pub(crate) fn set_outbox(
     }
 }
 
-/// Retry (section 7: the user retries a failed or `unknown` item): queued now, with a
-/// fresh retry schedule.
+/// Retry (section 7: the user retries a failed or `unknown` item), or Send now on a
+/// scheduled one (section 18.3): queued now, with a fresh retry schedule.
 pub(crate) fn retry_outbox(tx: &Transaction, id: OutboxId, now: i64) -> Result<bool> {
     Ok(tx.execute(
         "UPDATE outbox SET state = 'queued', send_after_utc = ?2, attempts = 0, last_error = ''
-         WHERE id = ?1 AND state IN ('failed', 'unknown')",
+         WHERE id = ?1 AND state IN ('failed', 'unknown', 'queued')",
         params![id, now],
     )? == 1)
 }

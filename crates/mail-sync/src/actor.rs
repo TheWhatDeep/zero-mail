@@ -933,6 +933,10 @@ async fn run_job<T: ImapTransport>(
                     ctx.store
                         .store_body(item.message_id, body, state, preview)
                         .await?;
+                    ctx.events.send(SyncEvent::BodyStored {
+                        account_id: ctx.account_id,
+                        message_id: item.message_id,
+                    });
                     ctx.events.send(SyncEvent::StoreChanged {
                         account_id: ctx.account_id,
                         folder_id: Some(folder_id),
@@ -1081,6 +1085,10 @@ async fn open_body<T: ImapTransport>(
         ctx.store
             .store_body(message_id, body, state, preview)
             .await?;
+        ctx.events.send(SyncEvent::BodyStored {
+            account_id: ctx.account_id,
+            message_id,
+        });
         ctx.events.send(SyncEvent::StoreChanged {
             account_id: ctx.account_id,
             folder_id: Some(folder.id),

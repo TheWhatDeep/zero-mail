@@ -55,6 +55,7 @@ fn fast() -> Timing {
         undo_window: Duration::ZERO,
         draft_upload: Duration::from_secs(3600),
         outbox_tick: Duration::from_millis(50),
+        ..Timing::default()
     }
 }
 

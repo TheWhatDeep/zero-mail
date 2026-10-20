@@ -171,6 +171,8 @@ impl Folder {
 #[derive(Debug)]
 struct State {
     caps: Capabilities,
+    /// PERMANENTFLAGS leaves out `\*`: new keywords are not kept (section 18.5).
+    no_new_keywords: bool,
     users: BTreeMap<String, String>,
     folders: BTreeMap<String, Folder>,
     /// (operation, successful calls still to let through, error).
@@ -272,6 +274,7 @@ impl FakeServer {
         folders.insert("INBOX".to_string(), Folder::new(1, Some(SpecialUse::Inbox)));
         let state = State {
             caps: Capabilities::parse(capabilities.iter().copied()),
+            no_new_keywords: false,
             users: BTreeMap::new(),
             folders,
             faults: VecDeque::new(),
@@ -337,6 +340,11 @@ impl FakeServer {
     }
 
     /// Adds LIST attributes to a folder, for example Gmail's `\Important` (section 9).
+    /// Whether SELECT's PERMANENTFLAGS include `\*` (new keywords such as `$Muted`).
+    pub fn set_new_keywords_allowed(&self, allowed: bool) {
+        self.lock().no_new_keywords = !allowed;
+    }
+
     pub fn set_attributes(&self, path: &str, attributes: &[&str]) -> Result<(), ImapError> {
         self.lock().folder_mut(path)?.attributes =
             attributes.iter().map(|a| (*a).to_string()).collect();
@@ -574,6 +582,7 @@ impl FakeTransport {
         let info = {
             let s = self.server.lock();
             let f = s.folder(path)?;
+            let keywords = !s.no_new_keywords;
             SelectInfo {
                 uidvalidity: f.uidvalidity,
                 uidnext: f.uidnext,
@@ -585,8 +594,10 @@ impl FakeTransport {
                     "\\Answered".into(),
                     "\\Draft".into(),
                     "\\Deleted".into(),
-                    "\\*".into(),
-                ],
+                ]
+                .into_iter()
+                .chain(keywords.then(|| "\\*".to_string()))
+                .collect(),
             }
         };
         self.selected = Some(path.to_string());

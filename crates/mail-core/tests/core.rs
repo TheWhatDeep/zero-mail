@@ -160,8 +160,8 @@ async fn an_added_account_syncs_and_the_reader_commands_see_it() {
     assert!(body.csp.starts_with("default-src 'none'"));
     assert_eq!(s.core.mail_body(999, "images=0").await.unwrap().status, 404);
 
-    // Unified, search and thread scopes arrive in M9.
-    let err = s
+    // All Inboxes (M9) lists this account's INBOX too.
+    let unified = s
         .core
         .list_page(ListRequest {
             scope: Scope::Unified,
@@ -170,8 +170,8 @@ async fn an_added_account_syncs_and_the_reader_commands_see_it() {
             group_by_thread: false,
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code, ErrorCode::Unsupported);
+        .unwrap();
+    assert_eq!(unified.rows.len(), 3, "the three INBOX messages");
 
     // T04, the Core half: a message expunged elsewhere is gone for message.open.
     s.imap.expunge_external("INBOX", 1).unwrap();

@@ -135,6 +135,11 @@ pub enum CoreEvent {
         kind: String,
         error: AppError,
     },
+    /// A snooze came due and the message went back (section 3, 18.2).
+    SnoozeDue {
+        account_id: AccountId,
+        message_id: MessageId,
+    },
     /// A browser sign-in ended: tokens saved and Test connection passed, or why not
     /// (section 3; SPEC_GAPS G71).
     OauthDone {
@@ -157,6 +162,7 @@ impl CoreEvent {
             Self::OutboxState { .. } => "outbox-state",
             Self::OpFailed { .. } => "op-failed",
             Self::OauthDone { .. } => "oauth-done",
+            Self::SnoozeDue { .. } => "snooze-due",
         }
     }
 }
@@ -189,6 +195,12 @@ pub struct Core<I, S, H> {
     pub(crate) deps: SyncDeps<I, KeychainLogins<H>>,
     /// The browser sign-in waiting for its redirect, per account (section 5).
     sign_ins: Mutex<HashMap<AccountId, tokio::task::JoinHandle<()>>>,
+    /// Message-IDs this app moved into an INBOX or watched folder (Undo, a move back), and
+    /// when: arriving there they are not new mail, so rules do not file them again and they
+    /// do not notify (section 18.6; SPEC_GAPS G77).
+    pub(crate) moved_in: Mutex<HashMap<String, Instant>>,
+    /// New messages whose rules wait for the body (section 18.6).
+    pub(crate) rules_waiting: Mutex<HashSet<MessageId>>,
     /// Submission for the outbox (section 7).
     pub(crate) smtp: S,
     /// The undo window and upload delay (section 7).
@@ -316,6 +328,8 @@ where
             timing: Mutex::default(),
             upload_timers: Mutex::default(),
             sign_ins: Mutex::default(),
+            moved_in: Mutex::default(),
+            rules_waiting: Mutex::default(),
             outbox_wake: Arc::default(),
             me: std::sync::OnceLock::new(),
             store,
@@ -335,11 +349,13 @@ where
             images_once: Mutex::default(),
             unreadable: Arc::default(),
         });
+        let (follow_tx, follow_rx) = mpsc::unbounded_channel();
         tokio::spawn(pump(
             rx,
             Arc::clone(&sink),
             states,
             Some(core.store.clone()),
+            Some(follow_tx),
         ));
         if rebuilt {
             sink(CoreEvent::StorageWarning { kind: "db_corrupt" });
@@ -363,6 +379,8 @@ where
             Arc::clone(&core.outbox_wake),
         ));
         lock(&core.background).push(runner);
+        let features = tokio::spawn(crate::features::runner(Arc::downgrade(&core), follow_rx));
+        lock(&core.background).push(features);
         Ok(core)
     }
 
@@ -632,7 +650,26 @@ where
             delete_is_permanent: here
                 .is_none_or(|h| crate::mailbox::delete_is_permanent(&folders, h)),
         };
-        Ok(views::message_view(&message, &attachments, info))
+        let mut view = views::message_view(&message, &attachments, info);
+        if let Some(stored) = self.store.gm_labels(message_id).await? {
+            // The labels are the folders the message is in (section 18.1), read from the
+            // rows, so a label just added or removed shows at once.
+            let copies = self.store.copies(message_id).await?;
+            let mut labels: Vec<views::LabelView> = copies
+                .iter()
+                .filter_map(|c| folders.iter().find(|f| f.id == c.folder_id))
+                .filter(|f| f.special_use != Some(mail_store::SpecialUse::All))
+                .map(|f| views::LabelView {
+                    folder_id: f.id,
+                    name: views::folder_name(f),
+                })
+                .collect();
+            labels.sort_by_key(|l| l.name.to_lowercase());
+            labels.dedup_by_key(|l| l.folder_id);
+            view.labels = Some(labels);
+            view.important = stored.iter().any(|l| l.eq_ignore_ascii_case(r"\Important"));
+        }
+        Ok(view)
     }
 
     /// Images load for a message the user allowed once, or whose sender is on the
@@ -940,6 +977,7 @@ async fn pump(
     sink: EventSink,
     states: States,
     store: Option<Store>,
+    follow: Option<mpsc::UnboundedSender<SyncEvent>>,
 ) {
     let mut pending: BTreeSet<(AccountId, Option<FolderId>)> = BTreeSet::new();
     let mut deadline: Option<Instant> = None;
@@ -1025,6 +1063,12 @@ async fn pump(
                 kind,
                 error: sync_error(&error).for_account(account_id),
             }),
+            // New mail and stored bodies go to the core's own task (rules, mute, snooze).
+            e @ (SyncEvent::NewMail { .. } | SyncEvent::BodyStored { .. }) => {
+                if let Some(tx) = &follow {
+                    let _ = tx.send(e);
+                }
+            }
         }
     }
 }
@@ -1040,7 +1084,7 @@ mod tests {
         let log = Arc::clone(&seen);
         let sink: EventSink = Arc::new(move |e| lock(&log).push((Instant::now(), e)));
         let start = Instant::now();
-        tokio::spawn(pump(rx, sink, Arc::default(), None));
+        tokio::spawn(pump(rx, sink, Arc::default(), None, None));
         for _ in 0..50 {
             tx.send(SyncEvent::StoreChanged {
                 account_id: 1,
@@ -1078,7 +1122,7 @@ mod tests {
         let log = Arc::clone(&seen);
         let states: States = Arc::default();
         let sink: EventSink = Arc::new(move |e| lock(&log).push(e));
-        let pumped = tokio::spawn(pump(rx, sink, Arc::clone(&states), None));
+        let pumped = tokio::spawn(pump(rx, sink, Arc::clone(&states), None, None));
         tx.send(SyncEvent::AccountState {
             account_id: 4,
             state: AccountState::NeedsAttention,

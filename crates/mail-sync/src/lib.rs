@@ -18,6 +18,7 @@ pub mod ops;
 
 pub use actor::{login_request, spawn_account, AccountHandle, ServerSearch, SyncDeps};
 pub use body::preview;
+pub use folder::MUTED_KEYWORD;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -127,6 +128,19 @@ pub enum SyncEvent {
     },
     /// The number of unfinished ops may have changed (`pending-count`).
     PendingChanged { account_id: AccountId },
+    /// New messages arrived in a folder and were stored, after that folder's sync. Not
+    /// sent for a folder's first sync. Rules, mute and snooze react to it (section 18), and
+    /// notifications (section 11).
+    NewMail {
+        account_id: AccountId,
+        folder_id: FolderId,
+        message_ids: Vec<mail_store::MessageId>,
+    },
+    /// A message's body was stored: rules with body conditions can run (section 18.6).
+    BodyStored {
+        account_id: AccountId,
+        message_id: mail_store::MessageId,
+    },
     /// The server refused an op for good; its overlay was reverted (SPEC_GAPS G58).
     /// `op_id` is the Undo group the UI knows.
     OpFailed {

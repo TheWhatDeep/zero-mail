@@ -32,6 +32,10 @@ pub mod kind {
     pub const DRAFT_REPLACE: &str = "draft_replace";
     /// Remove an uploaded draft (sent or discarded).
     pub const DRAFT_DELETE: &str = "draft_delete";
+    /// Gmail: add a label, `UID COPY` to the label's folder (section 18.1).
+    pub const LABEL_ADD: &str = "label_add";
+    /// Gmail: remove a label, `\Deleted` and `UID EXPUNGE` of that UID in its folder.
+    pub const LABEL_REMOVE: &str = "label_remove";
 }
 
 /// The Sent copy of outbox item `outbox_id`, to `sent` (section 7). Whether it is filed is
@@ -103,6 +107,22 @@ pub fn flags_op(
     }
 }
 
+/// A keyword that only the server keeps (`$Muted`, section 18.5): set or cleared where the
+/// folder's PERMANENTFLAGS take new keywords, skipped elsewhere. No local bits change.
+pub fn keyword_op(
+    account_id: AccountId,
+    folder_id: FolderId,
+    uids: Vec<u32>,
+    keyword: &str,
+    set: bool,
+) -> NewOp {
+    let flag = [Flag::Keyword(keyword.to_string())];
+    let (add, remove): (&[Flag], &[Flag]) = if set { (&flag, &[]) } else { (&[], &flag) };
+    let mut op = flags_op(account_id, folder_id, uids, add, remove);
+    op.args["keywords_if_allowed"] = json!(true);
+    op
+}
+
 /// Move (also Archive, Delete to Trash and Spam): the rows are hidden at once (G59). The
 /// Message-IDs let Undo find the messages again when the server gives no COPYUID.
 pub fn move_op(
@@ -122,6 +142,22 @@ pub fn move_op(
     }
 }
 
+/// Snooze (section 18.2): a move to the Snoozed folder whose snoozes follow the copies
+/// (`rows` are the source rows, in the order of `message_ids`).
+pub fn snooze_op(
+    account_id: AccountId,
+    folder_id: FolderId,
+    uids: Vec<u32>,
+    snoozed: &Folder,
+    message_ids: Vec<String>,
+    rows: Vec<i64>,
+) -> NewOp {
+    let mut op = move_op(account_id, folder_id, uids, snoozed, message_ids);
+    op.args["snooze"] = json!(true);
+    op.args["rows"] = json!(rows);
+    op
+}
+
 /// Undo of a move whose COPYUID is unknown: the messages are found in `folder_id` by
 /// Message-ID after a resync, then moved back (section 9, Undo).
 pub fn move_back_by_message_id(
@@ -139,6 +175,57 @@ pub fn move_back_by_message_id(
             "dest": dest.id, "dest_path": dest.path, "message_ids": message_ids, "find": true
         }),
         overlay: Overlay::default(),
+    }
+}
+
+/// Gmail add label (section 18.1): `UID COPY` from the message's row to the label's folder.
+/// Gmail deduplicates by `X-GM-MSGID`, so this adds a label and never a second copy. The row
+/// stays as it is.
+pub fn label_add_op(
+    account_id: AccountId,
+    folder_id: FolderId,
+    uids: Vec<u32>,
+    label: &Folder,
+    message_ids: Vec<String>,
+) -> NewOp {
+    NewOp {
+        account_id,
+        folder_id,
+        uids,
+        kind: kind::LABEL_ADD.into(),
+        args: json!({ "dest": label.id, "dest_path": label.path, "message_ids": message_ids }),
+        overlay: Overlay::default(),
+    }
+}
+
+/// Gmail remove label (section 18.1): in the label's folder, `\Deleted` and `UID EXPUNGE`
+/// of those UIDs only; the row is hidden at once. `restore` is a row of the same message in
+/// another folder, which Undo copies back from. With `find`, the UIDs are looked up by
+/// Message-ID first (Undo of an add without COPYUID).
+pub fn label_remove_op(
+    account_id: AccountId,
+    label: FolderId,
+    uids: Vec<u32>,
+    message_ids: Vec<String>,
+    restore: Option<(FolderId, u32)>,
+    find: bool,
+) -> NewOp {
+    NewOp {
+        account_id,
+        folder_id: label,
+        uids,
+        kind: kind::LABEL_REMOVE.into(),
+        args: json!({
+            "message_ids": message_ids,
+            "restore_folder": restore.map(|r| r.0),
+            "restore_uid": restore.map(|r| r.1),
+            "find": find,
+        }),
+        overlay: if find {
+            Overlay::default()
+        } else {
+            Overlay::HIDE
+        },
     }
 }
 
@@ -190,6 +277,16 @@ pub(crate) async fn run_folder_ops<T: ImapTransport>(
     folder: &Folder,
 ) -> Result<Followup, SyncError> {
     let mut follow = Followup::default();
+    // Folder ops go first: a message op may target a folder created a moment ago (the
+    // Snoozed folder on a first snooze, section 18.2). CREATE leaves the selection alone.
+    if store
+        .account_ops(account_id)
+        .await?
+        .iter()
+        .any(is_folder_op)
+    {
+        run_folder_ops_account(t, store, events, account_id).await?;
+    }
     let ops: Vec<PendingOp> = store
         .account_ops(account_id)
         .await?
@@ -208,6 +305,11 @@ pub(crate) async fn run_folder_ops<T: ImapTransport>(
                 follow.sync.push(folder.id);
             }
             Ok(Outcome::Moved(result)) => {
+                if op.args["snooze"].as_bool() == Some(true) {
+                    // The source row goes at this folder's next pull; the snooze must point
+                    // at the copy in the Snoozed folder first (SPEC_GAPS G77).
+                    follow_snooze(t, store, folder, &op, &result).await?;
+                }
                 store
                     .set_op_state(op.id, OpState::Done, Some(result), None)
                     .await?;
@@ -233,6 +335,75 @@ pub(crate) async fn run_folder_ops<T: ImapTransport>(
         events.send(SyncEvent::PendingChanged { account_id });
     }
     Ok(follow)
+}
+
+/// After a snooze move: header-fetches the moved copies in the destination, re-points each
+/// snooze at its copy, and selects `folder` again for the ops still to run.
+async fn follow_snooze<T: ImapTransport>(
+    t: &mut T,
+    store: &Store,
+    folder: &Folder,
+    op: &PendingOp,
+    result: &Value,
+) -> Result<(), SyncError> {
+    let Some(dest_id) = op.args["dest"].as_i64() else {
+        return Ok(());
+    };
+    let dest = store.get_folder(dest_id).await?;
+    let info = t.select(&dest.path).await?;
+    if dest.uidvalidity == 0 {
+        store.set_uidvalidity(dest.id, info.uidvalidity).await?;
+    }
+    let message_ids: Vec<String> = op.args["message_ids"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let rows: Vec<i64> = op.args["rows"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    let mut uids: Vec<u32> = result["copyuid"]["dest"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|u| u32::try_from(u).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if uids.is_empty() {
+        for id in message_ids.iter().filter(|i| !i.starts_with("synth:")) {
+            let key = SearchKey::Header("Message-ID".into(), format!("<{id}>"));
+            uids.extend(t.uid_search(&key).await?);
+        }
+    }
+    let known: HashSet<u32> = store.cached_uids(dest.id).await?.into_iter().collect();
+    let missing: Vec<u32> = uids.into_iter().filter(|u| !known.contains(u)).collect();
+    if !missing.is_empty() {
+        let gmail = t.capabilities().gmail;
+        let headers = t
+            .uid_fetch_headers(&UidSet::new(missing), mail_imap::HeaderFetch { gmail })
+            .await?;
+        let new: Vec<_> = headers
+            .iter()
+            .map(|h| convert::new_message(h, op.account_id, dest.id, now(), gmail))
+            .collect();
+        if !new.is_empty() {
+            store.insert_synced(dest.id, new).await?;
+        }
+    }
+    for (old, id) in rows.iter().zip(&message_ids) {
+        if let Some(copy) = store.find_by_message_id(dest.id, id.clone()).await? {
+            store.repoint_snooze(*old, copy).await?;
+        }
+    }
+    t.select(&folder.path).await?;
+    Ok(())
 }
 
 fn error_text(e: &SyncError) -> String {
@@ -339,6 +510,13 @@ async fn run_message_op<T: ImapTransport>(
     let set = UidSet::new(present);
     match op.kind.as_str() {
         kind::FLAGS => {
+            // `$Muted` only where PERMANENTFLAGS take new keywords (section 18.5); the
+            // folder is selected again to read them.
+            if op.args["keywords_if_allowed"].as_bool() == Some(true)
+                && !t.select(&folder.path).await?.allows_new_keywords()
+            {
+                return Ok(Outcome::Flags);
+            }
             let add = flags_from(&op.args["add"]);
             let remove = flags_from(&op.args["remove"]);
             for chunk in set.chunks() {
@@ -388,7 +566,32 @@ async fn run_message_op<T: ImapTransport>(
             });
             Ok(Outcome::Moved(json!({ "copyuid": copyuid })))
         }
-        kind::EXPUNGE | kind::DRAFT_DELETE => {
+        kind::LABEL_ADD => {
+            let dest = op.args["dest_path"]
+                .as_str()
+                .ok_or(SyncError::Store("label without a folder".into()))?;
+            let mut copied = CopyUid {
+                uidvalidity: 0,
+                source: Vec::new(),
+                dest: Vec::new(),
+            };
+            let mut complete = true;
+            for chunk in set.chunks() {
+                match t.uid_copy(&chunk, dest).await? {
+                    Some(c) => {
+                        copied.uidvalidity = c.uidvalidity;
+                        copied.source.extend(c.source);
+                        copied.dest.extend(c.dest);
+                    }
+                    None => complete = false,
+                }
+            }
+            let copyuid = (complete && !copied.dest.is_empty()).then(|| {
+                json!({ "uidvalidity": copied.uidvalidity, "source": copied.source, "dest": copied.dest })
+            });
+            Ok(Outcome::Moved(json!({ "copyuid": copyuid })))
+        }
+        kind::EXPUNGE | kind::DRAFT_DELETE | kind::LABEL_REMOVE => {
             for chunk in set.chunks() {
                 t.uid_store(&chunk, StoreOp::Add, &[Flag::Deleted]).await?;
                 expunge_exactly(t, &chunk).await?;

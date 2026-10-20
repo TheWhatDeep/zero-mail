@@ -47,6 +47,28 @@ fn role_folder(folders: &[Folder], role: SpecialUse) -> Option<&Folder> {
     folders.iter().find(|f| f.special_use == Some(role))
 }
 
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn uids(v: &Value) -> Vec<u32> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|u| u32::try_from(u).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The messages of one source folder in a command.
 struct Group {
     account_id: AccountId,
@@ -94,6 +116,21 @@ where
 
     /// Queues ops in one transaction, tells the actors, and reports the new pending count.
     async fn queue(&self, new: Vec<NewOp>) -> Result<OpId, AppError> {
+        // Messages this app moves into an INBOX or watched folder are not new mail there
+        // (rules and notifications, SPEC_GAPS G77).
+        for op in new.iter().filter(|o| o.kind == kind::MOVE) {
+            let Some(dest) = op.args["dest"].as_i64() else {
+                continue;
+            };
+            if let Ok(f) = self.store.get_folder(dest).await {
+                if f.special_use == Some(SpecialUse::Inbox) || f.watch_idle {
+                    let mut moved = crate::core::lock(&self.moved_in);
+                    for id in strings(&op.args["message_ids"]) {
+                        moved.insert(id, tokio::time::Instant::now());
+                    }
+                }
+            }
+        }
         let _ = self
             .store
             .purge_done_ops(ops::timestamp() - mail_sync::UNDO_WINDOW_SECS)
@@ -292,10 +329,101 @@ where
         self.queue(new).await
     }
 
+    /// `message.add_label` (Gmail, section 18.1): `UID COPY` of each message to the label's
+    /// folder; Gmail keeps one `X-GM-MSGID`, so the message gains a label, not a copy.
+    pub async fn message_add_label(
+        &self,
+        message_ids: &[MessageId],
+        folder_id: FolderId,
+    ) -> Result<OpId, AppError> {
+        let label = self.store.get_folder(folder_id).await?;
+        let mut new = Vec::new();
+        for id in message_ids {
+            let copies = self.store.copies(*id).await?;
+            if copies.is_empty() {
+                return Err(AppError::new(
+                    ErrorCode::Unsupported,
+                    "labels are a Gmail feature",
+                ));
+            }
+            if copies.iter().any(|c| c.folder_id == label.id) {
+                continue;
+            }
+            let m = self.store.get_message(*id).await?;
+            if m.account_id != label.account_id {
+                return Err(AppError::invalid("labels belong to the message's account"));
+            }
+            new.push(ops::label_add_op(
+                m.account_id,
+                m.folder_id,
+                vec![m.uid],
+                &label,
+                vec![m.message_id],
+            ));
+        }
+        if new.is_empty() {
+            return Err(AppError::invalid("the label is already on"));
+        }
+        self.queue(new).await
+    }
+
+    /// `message.remove_label` (Gmail, section 18.1): in the label's folder, `\Deleted` and
+    /// `UID EXPUNGE` of that UID only. The message stays under its other labels.
+    pub async fn message_remove_label(
+        &self,
+        message_ids: &[MessageId],
+        folder_id: FolderId,
+    ) -> Result<OpId, AppError> {
+        let label = self.store.get_folder(folder_id).await?;
+        let mut new = Vec::new();
+        for id in message_ids {
+            let copies = self.store.copies(*id).await?;
+            if copies.is_empty() {
+                return Err(AppError::new(
+                    ErrorCode::Unsupported,
+                    "labels are a Gmail feature",
+                ));
+            }
+            let Some(here) = copies.iter().find(|c| c.folder_id == label.id) else {
+                continue;
+            };
+            let restore = copies
+                .iter()
+                .find(|c| c.folder_id != label.id)
+                .map(|c| (c.folder_id, c.uid));
+            if restore.is_none() {
+                // The last label: removing it would delete the message.
+                return Err(AppError::invalid("a message keeps at least one label"));
+            }
+            let m = self.store.get_message(here.id).await?;
+            new.push(ops::label_remove_op(
+                m.account_id,
+                label.id,
+                vec![m.uid],
+                vec![m.message_id],
+                restore,
+                false,
+            ));
+        }
+        if new.is_empty() {
+            return Err(AppError::invalid("the label is not on"));
+        }
+        self.queue(new).await
+    }
+
     /// `message.undo` (section 9): a queued op is cancelled and its overlay lifted; a
     /// finished move goes back with COPYUID, or by Message-ID after a resync; a flag change
     /// is reversed. A permanent delete cannot be undone.
     pub async fn message_undo(&self, op_id: OpId) -> Result<(), AppError> {
+        // An op can start between the look and the cancel; then it is undone once it has
+        // finished, as a done one.
+        match self.undo_attempt(op_id).await {
+            Err(e) if e.code == ErrorCode::Conflict => self.undo_attempt(op_id).await,
+            other => other,
+        }
+    }
+
+    async fn undo_attempt(&self, op_id: OpId) -> Result<(), AppError> {
         let group = match self.store.get_op(op_id).await {
             Ok(op) => op.group,
             // The op failed and was reverted, or it already ran and was purged.
@@ -309,6 +437,21 @@ where
             .map_err(|e| crate::core::sync_error(&e))?;
         let mut reverse = Vec::new();
         for op in settled {
+            if op.args["snooze"].as_bool() == Some(true) {
+                // Undo of a snooze: the message is no longer snoozed, wherever it is now.
+                for row in op.args["rows"].as_array().into_iter().flatten() {
+                    if let Some(id) = row.as_i64() {
+                        self.store.delete_snooze(id).await?;
+                    }
+                }
+                if let Some(dest) = op.args["dest"].as_i64() {
+                    for mid in strings(&op.args["message_ids"]) {
+                        if let Some(copy) = self.store.find_by_message_id(dest, mid).await? {
+                            self.store.delete_snooze(copy).await?;
+                        }
+                    }
+                }
+            }
             match op.state {
                 OpState::Queued => {
                     if !self.store.cancel_op(op.id).await? {
@@ -361,6 +504,40 @@ where
                         } else {
                             ops::move_op(op.account_id, dest.id, copied, &source, message_ids)
                         });
+                    }
+                    kind::LABEL_ADD => {
+                        let label = op.args["dest"].as_i64().unwrap_or_default();
+                        let message_ids = strings(&op.args["message_ids"]);
+                        let copied = uids(&op.result["copyuid"]["dest"]);
+                        reverse.push(ops::label_remove_op(
+                            op.account_id,
+                            label,
+                            copied.clone(),
+                            message_ids,
+                            Some((op.folder_id, op.uids.first().copied().unwrap_or_default())),
+                            copied.is_empty(),
+                        ));
+                    }
+                    kind::LABEL_REMOVE => {
+                        let (Some(from), Some(uid)) = (
+                            op.args["restore_folder"].as_i64(),
+                            op.args["restore_uid"]
+                                .as_u64()
+                                .and_then(|u| u32::try_from(u).ok()),
+                        ) else {
+                            return Err(AppError::new(
+                                ErrorCode::Unsupported,
+                                "nothing to restore",
+                            ));
+                        };
+                        let label = self.store.get_folder(op.folder_id).await?;
+                        reverse.push(ops::label_add_op(
+                            op.account_id,
+                            from,
+                            vec![uid],
+                            &label,
+                            strings(&op.args["message_ids"]),
+                        ));
                     }
                     kind::FLAGS => {
                         let names = |key: &str| -> Vec<Flag> {

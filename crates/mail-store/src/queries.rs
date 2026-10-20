@@ -857,6 +857,33 @@ fn in_list(ids: &[FolderId]) -> String {
     ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
 }
 
+/// The visible rows of the same Gmail message (one per label, section 18.1), including the
+/// message itself. Empty for a message without `X-GM-MSGID`.
+pub(crate) fn copies(conn: &Connection, message: MessageId) -> Result<Vec<MessageCopy>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT c.id, c.folder_id, c.uid FROM messages AS m
+         JOIN messages AS c ON c.account_id = m.account_id AND c.gm_msgid = m.gm_msgid
+         WHERE m.id = ?1 AND m.gm_msgid IS NOT NULL AND (c.flags & ?2) = 0
+         ORDER BY c.id",
+    )?;
+    let rows = stmt.query_map(params![message, HIDDEN], |r| {
+        Ok(MessageCopy {
+            id: r.get(0)?,
+            folder_id: r.get(1)?,
+            uid: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The `X-GM-LABELS` stored with a message; `None` when it has none (not Gmail).
+pub(crate) fn gm_labels(conn: &Connection, message: MessageId) -> Result<Option<Vec<String>>> {
+    let json: Option<String> = conn
+        .prepare_cached("SELECT gm_labels_json FROM messages WHERE id = ?1")?
+        .query_row([message], |r| r.get(0))?;
+    Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+}
+
 /// Newest first across several folders (All Inboxes, section 11), strictly after the cursor.
 pub(crate) fn folders_page(
     conn: &Connection,

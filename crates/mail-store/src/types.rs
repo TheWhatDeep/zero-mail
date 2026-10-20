@@ -609,3 +609,66 @@ impl SqlParam {
         }
     }
 }
+
+/// One row of a Gmail message: the message under one label (section 18.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageCopy {
+    pub id: MessageId,
+    pub folder_id: FolderId,
+    pub uid: u32,
+}
+
+/// A snoozed message (section 18.2): due time and the folder it returns to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Snooze {
+    pub message_id: MessageId,
+    pub account_id: AccountId,
+    pub due_utc: i64,
+    pub origin_folder_id: FolderId,
+}
+
+/// A client-side rule (section 18.6). `account_id` `None` applies to every account;
+/// conditions and actions are the JSON the rules engine reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RuleRecord {
+    pub id: i64,
+    pub account_id: Option<AccountId>,
+    pub position: i64,
+    pub name: String,
+    pub enabled: bool,
+    pub conditions: serde_json::Value,
+    pub actions: serde_json::Value,
+    pub stop_processing: bool,
+}
+
+/// A template (section 18.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateRecord {
+    pub id: i64,
+    pub name: String,
+    pub subject: String,
+    pub body_html: String,
+    pub body_text: String,
+    pub updated_at: i64,
+}
+
+/// One message as the rules engine sees it (section 18.6). Address fields are their stored
+/// text (names and addresses); `body` is `None` until the body is cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleFacts {
+    pub id: MessageId,
+    pub account_id: AccountId,
+    pub folder_id: FolderId,
+    pub uid: u32,
+    pub thread_id: ThreadId,
+    pub message_id: String,
+    pub from: String,
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub list_id: Option<String>,
+    pub has_attach: bool,
+    pub body: Option<String>,
+    /// Moved or deleted already (a pending op hides it).
+    pub hidden: bool,
+}
