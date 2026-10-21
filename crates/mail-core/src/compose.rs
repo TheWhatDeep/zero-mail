@@ -1033,7 +1033,6 @@ where
             state: state_name(state),
         });
         if state == OutboxState::Sent {
-            self.store.mark_sent_at(id, now).await?;
             self.after_sent(&item).await?;
         }
         self.emit_pending().await;

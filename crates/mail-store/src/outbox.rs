@@ -106,6 +106,8 @@ pub(crate) fn claim_outbox(tx: &Transaction, id: OutboxId, now: i64) -> Result<b
     )? == 1)
 }
 
+/// Records an outcome. A `sent` item also gets `sent_at` in its envelope, in the same
+/// statement, for Sent late (section 18.3).
 pub(crate) fn set_outbox(
     tx: &Transaction,
     id: OutboxId,
@@ -118,7 +120,9 @@ pub(crate) fn set_outbox(
         "UPDATE outbox SET state = ?2,
              send_after_utc = coalesce(?3, send_after_utc),
              attempts = attempts + ?4,
-             last_error = coalesce(?5, last_error)
+             last_error = coalesce(?5, last_error),
+             envelope_json = CASE WHEN ?2 = 'sent'
+                 THEN json_set(envelope_json, '$.sent_at', unixepoch()) ELSE envelope_json END
          WHERE id = ?1",
         params![id, state.as_sql(), send_after, i64::from(attempt), error],
     )?;

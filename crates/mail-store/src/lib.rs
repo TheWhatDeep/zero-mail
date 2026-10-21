@@ -878,12 +878,6 @@ impl Store {
             .await
     }
 
-    /// Records when an outbox item was sent (Sent late, section 18.3).
-    pub async fn mark_sent_at(&self, id: OutboxId, at: i64) -> Result<()> {
-        self.write(move |tx| features::mark_sent_at(tx, id, at))
-            .await
-    }
-
     /// The visible rows of the same Gmail message, one per label, itself included.
     pub async fn copies(&self, message: MessageId) -> Result<Vec<MessageCopy>> {
         self.read(move |conn| queries::copies(conn, message)).await

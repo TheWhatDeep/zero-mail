@@ -820,4 +820,7 @@ None from spec v0.19. v0.19 records the owner's decisions G74 to G76.
   - the Undo race above;
   - a first snooze could race its folder's CREATE;
   - an interrupted session left damaged tokio and SQLite build artifacts, cleared by rebuilding them.
+- **Found by CI:**
+  - `cargo audit` reported two advisories published on 2026-10-19 and 10-20, in transitive TLS crates. RUSTSEC-2026-0382 affects `rustls-webpki` 0.103.15 and RUSTSEC-2026-0383 affects `webpki-root-certs` 1.0.9. Both were updated to their fixed patch releases (0.103.16, 1.0.10) in `Cargo.lock`; no crate was added.
+  - T38 saw an item marked `sent` before its `sent_at` was written, which was a second write. `sent_at` is now set in the same statement that marks the item sent.
 

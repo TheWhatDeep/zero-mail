@@ -606,3 +606,35 @@ Options:
 - **Thread view:** `list.page` with scope thread takes the open folder. Every expanded message is a full reading card; collapsed ones are one line and expand on a click.
 - **New indexes and test speed:** indexes added with v3: `messages(account_id, gm_msgid)`, `messages(account_id, date_utc, id)` and `threads(account_id, subject_norm)` (indexes are the builder's job, section 4). Test builds compile SQLite's C code optimized, so the T30 timing measures SQLite's real speed.
 - **Settings without a screen:** subject grouping (`threads.subject_merge`, default off), Group by conversation (on), and the snooze settings. Their switches come with Settings in M10, and so do the Rules and Templates management screens (section 11, Settings).
+
+## G78. Unsubscribe needs List-Unsubscribe, which is not stored — Open (blocks M10 unsubscribe)
+Section 18.7: an Unsubscribe button shows in the header when `List-Unsubscribe` is present, preferring RFC 8058 one-click (`List-Unsubscribe-Post`). Sync already fetches both headers but stores neither (G76 left them to M10).
+
+Options:
+- (a) **Recommended:** two nullable columns, `messages.list_unsubscribe` and `messages.list_unsubscribe_post`, filled at header fetch. The button shows offline too, and `message.unsubscribe` reads them.
+- (b) Fetch the headers when a message opens (a round trip per open). No button offline, and none until the fetch answers.
+
+## G79. The Privacy and Sync and storage screens need commands — Open (blocks two M10 Settings screens)
+Section 11 Settings has Privacy (the remote image allowlist) and Sync and storage. Invariant 7 asks for a Clear body cache action. No command lists or removes allowlisted senders, and none clears the body cache.
+
+Options:
+- (a) **Recommended:** three commands. `images.list_allowed {account_id}` returns the senders, `images.disallow_sender {account_id, address}` removes one, and `storage.clear_body_cache {}` drops bodies and attachment files, never headers.
+- (b) Pseudo-keys through `settings.get` and `settings.set`; no new commands, but the settings table does not hold these.
+- (c) Privacy lists nothing, and Clear body cache is left out.
+
+## G80. A notification click cannot open its message — Open (blocks part of M10 notifications)
+Section 11: "Click focuses the app on that message." The official notification plugin, the only one allowed, reports clicks on mobile only. On Windows a click on an installed app's toast starts the app again; with single instance (section 11), that focuses the running window.
+
+Options:
+- (a) **Recommended:** a click focuses the app (single instance). When the window comes to the front within 10 s of a notification, the app opens the newest notified message. A coalesced "N new messages" notification opens that account's INBOX.
+- (b) A click only focuses the app.
+- (c) Add a crate that reports Windows toast clicks (outside the section 2 table).
+
+## G81. A taskbar unread count on Windows — Open (blocks part of M10 tray work)
+Section 11: "Unread badge on the dock or taskbar where the OS supports it." Tauri's badge count covers macOS and Linux, not Windows. Windows has a taskbar overlay icon, but it is an image, and drawing digits needs an image crate. The window title and tray tooltip show the count either way (section 11).
+
+Options:
+- (a) **Recommended:** on Windows, a small solid dot overlay, drawn in code in the accent color, while anything is unread. The number is in the title and the tray tooltip. macOS and Linux use the badge count (M12).
+- (b) No taskbar badge on Windows; the title and tray only.
+- (c) A numbered overlay from bundled digit images (new image assets).
+

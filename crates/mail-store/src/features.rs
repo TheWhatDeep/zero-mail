@@ -4,8 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::{Result, StoreError};
 use crate::types::{
-    AccountId, FolderId, MessageCopy, MessageId, OutboxId, RuleFacts, RuleRecord, Snooze,
-    TemplateRecord, ThreadId,
+    AccountId, FolderId, MessageCopy, MessageId, RuleFacts, RuleRecord, Snooze, TemplateRecord,
+    ThreadId,
 };
 
 const HIDDEN: i64 = crate::types::Flags::DELETED as i64;
@@ -362,16 +362,5 @@ pub(crate) fn save_template(tx: &Transaction, t: &TemplateRecord) -> Result<i64>
 
 pub(crate) fn delete_template(tx: &Transaction, id: i64) -> Result<()> {
     tx.execute("DELETE FROM templates WHERE id = ?1", [id])?;
-    Ok(())
-}
-
-// Send later (18.3).
-
-/// Records when an outbox item was handed to SMTP, in its envelope, for Sent late.
-pub(crate) fn mark_sent_at(tx: &Transaction, id: OutboxId, at: i64) -> Result<()> {
-    tx.execute(
-        "UPDATE outbox SET envelope_json = json_set(envelope_json, '$.sent_at', ?2) WHERE id = ?1",
-        params![id, at],
-    )?;
     Ok(())
 }
