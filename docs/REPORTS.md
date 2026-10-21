@@ -727,7 +727,7 @@ None from spec v0.18. v0.17 and v0.18 record the owner's decisions G23, G70, G71
 
 Scope: threading, search, unified inbox, labels, snooze, send later, mute, templates and rules. Done when: T25 (the unified, search and thread views, G60), T29, T30, and T36 to T42.
 
-Every check below passes locally on Windows 10. CI: see the run linked in the commit after this report.
+Every check below passes locally on Windows 10. CI is green on Windows, in the Stalwart job (with the new M9 container test), in the startup and T19 harness and in the audit job ([run 39546027220](https://github.com/TheWhatDeep/zero-mail/actions/runs/39546027220)).
 
 ### Built
 - **Schema v3 (G74 to G76):**
