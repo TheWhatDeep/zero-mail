@@ -816,6 +816,37 @@ impl Store {
             .await
     }
 
+    /// The senders an account loads remote images from (SPEC_GAPS G79).
+    pub async fn remote_image_senders(&self, account: AccountId) -> Result<Vec<String>> {
+        self.read(move |conn| features::remote_image_senders(conn, account))
+            .await
+    }
+
+    /// Removes a sender from an account's remote image allowlist.
+    pub async fn disallow_remote_images(&self, account: AccountId, sender: String) -> Result<()> {
+        self.write(move |tx| features::disallow_remote_images(tx, account, &sender))
+            .await
+    }
+
+    /// Clear body cache (invariant 7): bodies go, headers stay.
+    pub async fn clear_bodies(&self) -> Result<usize> {
+        self.write(features::clear_bodies).await
+    }
+
+    /// A message's List-Unsubscribe and List-Unsubscribe-Post headers (section 18.7).
+    pub async fn unsubscribe_headers(
+        &self,
+        message: MessageId,
+    ) -> Result<(Option<String>, Option<String>)> {
+        self.read(move |conn| features::unsubscribe_headers(conn, message))
+            .await
+    }
+
+    /// Unread INBOX messages over every enabled account (section 11).
+    pub async fn unread_total(&self) -> Result<u32> {
+        self.read(features::unread_total).await
+    }
+
     /// What rule conditions test, per message (section 18.6).
     pub async fn rule_facts(&self, ids: Vec<MessageId>) -> Result<Vec<RuleFacts>> {
         self.read(move |conn| features::rule_facts(conn, &ids))

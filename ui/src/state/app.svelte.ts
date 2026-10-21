@@ -8,11 +8,22 @@ import {
   toAppError,
   type AccountView,
   type AppError,
+  type Attachment,
   type FolderView,
   type OutboxStateName,
   type OutboxView,
+  type Role,
 } from "../lib/ipc";
+import { NotifyClicks } from "../lib/m10";
+import { DEFAULTS, KEYS, rootAttributes, withValue, type UiSettings } from "../lib/settings";
+import type { ShortcutAction } from "../lib/shortcuts";
 import { errorText, opKindText, strings } from "../strings";
+
+/** What the open reading card does for a shortcut (section 11 table). */
+export type ReaderActions = Partial<Record<ShortcutAction, () => void>>;
+
+/** The print view's messages (section 18.8). */
+export type PrintJob = { message_id: number } | { thread_id: number };
 
 export type FormMode = { mode: "add" } | { mode: "edit"; account: AccountView };
 
@@ -93,6 +104,23 @@ class AppState {
   outbox = $state<Record<number, OutboxView[]>>({});
   /** The account whose Outbox view is open instead of a folder. */
   outboxAccount = $state<number | null>(null);
+  /** The page's settings (section 11, Settings; SPEC_GAPS G82). */
+  ui = $state<UiSettings>(DEFAULTS);
+  /** Settings replaces the list and reader while open. */
+  settingsOpen = $state(false);
+  /** First run: the welcome step was passed (section 11, onboarding). */
+  welcomed = $state(false);
+  /** Reading pane off: the selected message fills the main area (section 11). */
+  fullView = $state(false);
+  /** The print view is laid out for this (section 18.8). */
+  printing = $state<PrintJob | null>(null);
+  /** The image lightbox (section 18.9). */
+  lightbox = $state<{ message_id: number; attachment: Attachment } | null>(null);
+  /** The reading card of each open message registers its shortcut actions here. */
+  readers = new Map<number, ReaderActions>();
+  /** The message list moves its selection by this many rows (j and k). */
+  listMove: ((delta: number) => void) | null = null;
+  private clicks = new NotifyClicks();
 
   private unlisten: (() => void)[] = [];
   private nextToast = 1;
@@ -128,23 +156,172 @@ class AppState {
         this.toast(strings.opFailed(opKindText[p.kind], errorText[p.error.code]));
       }),
       on("outbox-state", (p) => void this.onOutboxState(p.account_id, p.outbox_id, p.state)),
+      on("notify", (p) =>
+        this.clicks.shown(
+          { account_id: p.account_id, message_id: p.message_id, count: p.count, at: Date.now() },
+          typeof document !== "undefined" && document.hasFocus() && document.visibilityState === "visible",
+        ),
+      ),
     ]);
     this.unlisten = offs;
     if (typeof window !== "undefined") {
       const update = () => (this.online = navigator.onLine);
+      // A notification click brings the window to the front (SPEC_GAPS G80).
+      const focus = () => void this.openNotified();
       window.addEventListener("online", update);
       window.addEventListener("offline", update);
+      window.addEventListener("focus", focus);
       this.unlisten.push(() => {
         window.removeEventListener("online", update);
         window.removeEventListener("offline", update);
+        window.removeEventListener("focus", focus);
       });
     }
+    await this.loadSettings();
     try {
       await this.reloadAccounts();
     } catch (err) {
       this.startError = toAppError(err);
     }
     this.loaded = true;
+  }
+
+  /** Reads the page's settings and applies theme and density. */
+  async loadSettings(): Promise<void> {
+    let next = this.ui;
+    for (const field of Object.keys(KEYS) as (keyof UiSettings)[]) {
+      try {
+        next = withValue(next, field, await commands["settings.get"](KEYS[field]));
+      } catch {
+        // The default stays.
+      }
+    }
+    this.ui = next;
+    this.grouped = next.groupByThread;
+    this.applyRoot();
+  }
+
+  /** Changes one page setting, stored by Core. */
+  async setUi<K extends keyof UiSettings>(field: K, value: UiSettings[K]): Promise<void> {
+    const ok = await this.act(async () => {
+      const stored = await commands["settings.set"](KEYS[field], value);
+      this.ui = withValue(this.ui, field, stored);
+    });
+    if (!ok) return;
+    if (field === "groupByThread") this.grouped = this.ui.groupByThread;
+    if (field === "readingPane") this.fullView = false;
+    this.applyRoot();
+  }
+
+  /** Group by conversation from the list's toggle: remembered (section 10, rule 5). */
+  setGrouped(on: boolean): void {
+    this.grouped = on;
+    void this.setUi("groupByThread", on);
+  }
+
+  private applyRoot(): void {
+    if (typeof document === "undefined") return;
+    const { theme, density } = rootAttributes(this.ui);
+    const root = document.documentElement;
+    if (theme) root.setAttribute("data-theme", theme);
+    else root.removeAttribute("data-theme");
+    if (density) root.setAttribute("data-density", density);
+    else root.removeAttribute("data-density");
+  }
+
+  /** The window came to the front: a recent notification opens its message (G80). */
+  private async openNotified(): Promise<void> {
+    const target = this.clicks.focused(Date.now());
+    if (!target) return;
+    this.settingsOpen = false;
+    if (target.kind === "inbox") {
+      this.goTo(target.account_id, "inbox");
+      return;
+    }
+    try {
+      const view = await commands["message.open"](target.message_id);
+      this.selectFolder(view.account_id, view.folder_id);
+      this.message = view.id;
+      this.fullView = this.ui.readingPane === "off";
+    } catch {
+      this.goTo(target.account_id, "inbox");
+    }
+  }
+
+  /** The account in view: the selected folder's, else the first. */
+  currentAccount(): number | undefined {
+    return this.outboxAccount ?? this.selected?.account_id ?? this.accounts[0]?.id;
+  }
+
+  /** g then i, d or s (section 11): a folder of the account in view. */
+  goTo(accountId: number | undefined, role: Role): void {
+    if (accountId === undefined) return;
+    const f = this.folders[accountId]?.find((x) => x.role === role);
+    if (!f) return;
+    this.settingsOpen = false;
+    this.form = null;
+    this.selectFolder(accountId, f.id);
+  }
+
+  /** Esc: closes the innermost open thing (section 11 table). */
+  close(): void {
+    if (this.lightbox) this.lightbox = null;
+    else if (this.settingsOpen) this.settingsOpen = false;
+    else if (this.fullView) this.fullView = false;
+    else if (this.message !== null || this.thread !== null) {
+      this.message = null;
+      this.thread = null;
+    }
+  }
+
+  /** Runs a shortcut (section 11 table, T34). */
+  shortcut(action: ShortcutAction): void {
+    const reader = this.message !== null ? this.readers.get(this.message) : undefined;
+    switch (action) {
+      case "next":
+        this.listMove?.(1);
+        return;
+      case "previous":
+        this.listMove?.(-1);
+        return;
+      case "open":
+        if (this.message !== null && this.ui.readingPane === "off") this.fullView = true;
+        return;
+      case "close":
+        this.close();
+        return;
+      case "compose": {
+        const account = this.currentAccount();
+        if (account !== undefined) void this.act(() => commands["compose.new"](account));
+        return;
+      }
+      case "search":
+        this.settingsOpen = false;
+        if (typeof document !== "undefined") document.getElementById("search-box")?.focus();
+        return;
+      case "goInbox":
+        this.goTo(this.currentAccount(), "inbox");
+        return;
+      case "goDrafts":
+        this.goTo(this.currentAccount(), "drafts");
+        return;
+      case "goSent":
+        this.goTo(this.currentAccount(), "sent");
+        return;
+      case "settings":
+        this.form = null;
+        this.settingsOpen = true;
+        return;
+      case "print":
+        if (this.thread) this.printing = { thread_id: this.thread.thread_id };
+        else if (this.message !== null) this.printing = { message_id: this.message };
+        return;
+      case "send":
+        // Compose windows handle Ctrl/Cmd+Enter themselves.
+        return;
+      default:
+        reader?.[action]?.();
+    }
   }
 
   stop(): void {
@@ -194,6 +371,7 @@ class AppState {
   }
 
   openOutbox(accountId: number): void {
+    this.settingsOpen = false;
     this.outboxAccount = accountId;
     this.unified = false;
     this.search = null;
@@ -203,6 +381,8 @@ class AppState {
 
   selectFolder(accountId: number, folderId: number): void {
     this.outboxAccount = null;
+    this.settingsOpen = false;
+    this.fullView = false;
     const same = this.selected?.account_id === accountId && this.selected.folder_id === folderId;
     if (same && !this.unified && !this.search) return;
     this.unified = false;
@@ -215,6 +395,8 @@ class AppState {
   /** All Inboxes (section 11): every account's INBOX in one list. */
   openUnified(): void {
     this.outboxAccount = null;
+    this.settingsOpen = false;
+    this.fullView = false;
     this.search = null;
     this.unified = true;
     this.message = null;

@@ -91,6 +91,8 @@ const SPEC: &[(&str, &[&str])] = &[
             "preview",
             "body_state",
             "list_id",
+            "list_unsubscribe",
+            "list_unsubscribe_post",
         ],
     ),
     (
@@ -212,6 +214,8 @@ const NULLABLE: &[(&str, &str)] = &[
     ("messages", "refs"),
     ("messages", "gm_labels_json"),
     ("messages", "list_id"),
+    ("messages", "list_unsubscribe"),
+    ("messages", "list_unsubscribe_post"),
     ("attachments", "content_id"),
     ("drafts", "imap_uid"),
     ("drafts", "uploaded_at"),

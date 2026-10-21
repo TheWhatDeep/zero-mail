@@ -7,7 +7,9 @@
   // A message deleted on the server keeps its body with a notice until closed (T04).
   // M9: Gmail label chips (18.1), Snooze (18.2), Mute (18.5) and Block sender (18.6). In a
   // thread view each expanded message is one of these cards (`messageId`, `embedded`).
-  import { onMount } from "svelte";
+  // M10: Unsubscribe after a confirmation (18.7), Print (18.8), image Preview (18.9), the
+  // Reading settings, and the card's shortcut actions (section 11 table).
+  import { onMount, untrack } from "svelte";
   import Avatar from "./Avatar.svelte";
   import Icon from "./Icon.svelte";
   import { addressList, formatSize, personName, readerDateText, subjectText } from "../lib/format";
@@ -17,6 +19,8 @@
   import { bodyUrl, decideLink, type LinkAction } from "../lib/links";
   import { platformUrl, usesHttpScheme } from "../lib/protocol";
   import { applyOpen, bodyArrived, emptyReader, type ReaderState } from "../lib/reader";
+  import { canPreview } from "../lib/m10";
+  import { markReadDelay } from "../lib/settings";
   import { blockRule, labelTargets } from "../lib/labels";
   import { PRESETS, epoch, fromLocalInput, presetTime, toLocalInput, type Preset } from "../lib/when";
   import { app } from "../state/app.svelte";
@@ -43,6 +47,8 @@
   let actionError = $state<AppError | null>(null);
   /** A permanent delete waiting for confirmation (section 9). */
   let confirmDelete = $state(false);
+  /** Unsubscribe waiting for confirmation (18.7: never without a click). */
+  let confirmUnsubscribe = $state(false);
   /** The message the read timer already ran for: it marks read once per opening. */
   let autoReadFor: number | null = null;
   const http = typeof navigator !== "undefined" && usesHttpScheme(navigator.userAgent);
@@ -65,7 +71,9 @@
     const id = current;
     pickSnooze = false;
     frameHeight = 0;
-    plain = false;
+    // Show formatted messages off: plain text first (section 8, Body choice).
+    plain = !untrack(() => app.ui.html);
+    confirmUnsubscribe = false;
     pendingLink = null;
     pendingOpen = null;
     actionError = null;
@@ -87,18 +95,63 @@
     if (n > 0 && current === s.view.id) void open(s.view.id);
   });
 
-  // Read state (section 8): shown for 1.5 s, an unread message is marked read, once.
+  // Read state (section 8): shown for 1.5 s (or at once, or never: the setting), an unread
+  // message is marked read, once.
   $effect(() => {
     const s = reader;
     if (s.kind !== "open" || !s.view.unread || s.view.body_kind === "loading" || autoReadFor === s.view.id) return;
+    const delay = markReadDelay(app.ui.markRead, READ_DELAY_MS);
+    if (delay === null) return;
     const id = s.view.id;
     const timer = setTimeout(() => {
       if (current !== id || autoReadFor === id) return;
       autoReadFor = id;
       void app.act(() => commands["message.set_flags"]([id], { seen: true }));
-    }, READ_DELAY_MS);
+    }, delay);
     return () => clearTimeout(timer);
   });
+
+  // The open card's shortcut actions (section 11 table).
+  $effect(() => {
+    const v = reader.kind === "open" && !reader.deleted ? reader.view : null;
+    if (!v) return;
+    const id = v.id;
+    app.readers.set(id, {
+      reply: () => void run(() => commands["compose.reply"](id)),
+      replyAll: () => void run(() => commands["compose.reply_all"](id)),
+      forward: () => void run(() => commands["compose.forward"](id, false)),
+      archive: () => {
+        if (v.can_archive) void undoable(() => commands["message.archive"]([id]), strings.archivedToast);
+      },
+      delete: () => (deleteNeedsConfirm(v) ? (confirmDelete = true) : remove(id, false)),
+      star: () => void app.act(() => commands["message.set_flags"]([id], { flagged: !v.flagged })),
+      snooze: () => snoozePreset(id, "pick"),
+      mute: () =>
+        void app.act(() => (v.muted ? commands["message.unmute"](v.thread_id) : commands["message.mute"](v.thread_id))),
+      toggleUnread: () => {
+        autoReadFor = id;
+        void app.act(() => commands["message.set_flags"]([id], { seen: v.unread }));
+      },
+    });
+    return () => {
+      app.readers.delete(id);
+    };
+  });
+
+  /** Unsubscribe, after the confirmation (section 18.7). */
+  async function unsubscribe(id: number): Promise<void> {
+    confirmUnsubscribe = false;
+    await run(async () => {
+      const out = await commands["message.unsubscribe"](id);
+      app.toast(
+        out.method === "one_click"
+          ? strings.unsubscribedToast
+          : out.method === "mailto"
+            ? strings.unsubscribeDraftToast
+            : strings.unsubscribePageToast,
+      );
+    });
+  }
 
   /** Archive, delete or move: the row leaves at once, with a 10 s Undo toast (section 9). */
   async function undoable(run: () => Promise<number>, text: string, undo = true): Promise<void> {
@@ -277,6 +330,10 @@
           >
             {view.muted ? strings.unmute : strings.mute}
           </button>
+          {#if view.unsubscribe !== null}
+            <button class="small tint press" onclick={() => (confirmUnsubscribe = true)}>{strings.unsubscribe}</button>
+          {/if}
+          <button class="small tint press" onclick={() => (app.printing = { message_id: view.id })}>{strings.print}</button>
           {#if view.from.addr}
             <button
               class="small tint press"
@@ -336,6 +393,15 @@
                 }}>{strings.snooze}</button
               >
               <button class="small tint press" onclick={() => (pickSnooze = false)}>{strings.cancel}</button>
+            </span>
+          </div>
+        {/if}
+        {#if confirmUnsubscribe && view.unsubscribe !== null}
+          <div class="notice confirm" role="alertdialog" aria-label={strings.unsubscribe}>
+            <span class="text">{strings.unsubscribeConfirm[view.unsubscribe]}</span>
+            <span class="actions">
+              <button class="small tint press" onclick={() => unsubscribe(view.id)}>{strings.unsubscribe}</button>
+              <button class="small tint press" onclick={() => (confirmUnsubscribe = false)}>{strings.cancel}</button>
             </span>
           </div>
         {/if}
@@ -461,6 +527,11 @@
               <span class="file"><Icon name="fileText" size="--icon-16" /></span>
               <span class="file-name" title={a.filename}>{a.filename || strings.unnamedAttachment}</span>
               <span class="meta-small">{formatSize(a.size)}</span>
+              {#if canPreview(a)}
+                <button class="small tint press" onclick={() => (app.lightbox = { message_id: view.id, attachment: a })}>
+                  {strings.preview}
+                </button>
+              {/if}
               <button class="small tint press" onclick={() => openAttachment(a)}>{strings.openAttachment}</button>
               <button class="small tint press" onclick={() => run(() => commands["attachment.save"](a.id))}>
                 {strings.saveAttachment}

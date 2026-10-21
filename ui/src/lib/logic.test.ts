@@ -214,6 +214,7 @@ describe("reader", () => {
     thread_id: id,
     muted: false,
     snoozed_until: null,
+    unsubscribe: null,
     body_url: `mail-body://localhost/${id}?images=0`,
     attachments: [],
     remote_images: "none",

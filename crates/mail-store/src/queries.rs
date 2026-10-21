@@ -283,9 +283,9 @@ pub(crate) fn insert_messages(
         "INSERT INTO messages (account_id, folder_id, uid, gm_msgid, gm_thrid, message_id,
              in_reply_to, refs, gm_labels_json, thread_id, subject, from_name, from_addr, to_json,
              cc_json, reply_to_json, date_utc, internal_utc, size, flags, has_attach, preview,
-             body_state, list_id)
+             body_state, list_id, list_unsubscribe, list_unsubscribe_post)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-             ?19, ?20, ?21, ?22, ?23, ?24)",
+             ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
     )?;
     let mut attach = tx.prepare_cached(
         "INSERT INTO attachments (message_id, part_id, filename, mime, size, content_id, is_inline)
@@ -323,6 +323,8 @@ pub(crate) fn insert_messages(
             m.preview,
             m.body_state.as_sql(),
             m.list_id,
+            m.list_unsubscribe,
+            m.list_unsubscribe_post,
         ])?;
         let id = tx.last_insert_rowid();
         for a in &m.attachments {
@@ -655,7 +657,7 @@ pub(crate) fn get_message(conn: &Connection, id: MessageId) -> Result<MessageRec
     let (record, to, cc, reply_to) = conn.query_row(
         "SELECT id, account_id, folder_id, uid, thread_id, message_id, subject, from_name,
                 from_addr, to_json, cc_json, reply_to_json, date_utc, internal_utc, size, flags,
-                has_attach, body_state
+                has_attach, body_state, preview
          FROM messages WHERE id = ?1",
         [id],
         |r| {
@@ -682,6 +684,7 @@ pub(crate) fn get_message(conn: &Connection, id: MessageId) -> Result<MessageRec
                     flags: Flags(r.get(15)?),
                     has_attach: r.get(16)?,
                     body_state: enum_column(r, 17, BodyState::from_sql)?,
+                    preview: r.get(18)?,
                 },
                 r.get::<_, String>(9)?,
                 r.get::<_, String>(10)?,

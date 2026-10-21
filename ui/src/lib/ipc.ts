@@ -58,6 +58,8 @@ export interface AccountSummary {
   pinned_cert_sha256: string | null;
   enabled: boolean;
   sync_days: number;
+  signature_html: string;
+  signature_text: string;
 }
 
 export type AccountState = "disabled" | "connecting" | "syncing" | "idle" | "backoff" | "needs_attention";
@@ -96,6 +98,9 @@ export interface AccountConfig {
   /** Google sign-in only (SPEC_GAPS G70); null keeps the saved value on update. */
   oauth_client_id?: string | null;
   oauth_client_secret?: string | null;
+  /** The account's signature (Settings, Identities and signatures); null keeps it. */
+  signature_html?: string | null;
+  signature_text?: string | null;
 }
 
 export type Role = "inbox" | "drafts" | "sent" | "archive" | "junk" | "trash" | "all";
@@ -226,7 +231,22 @@ export interface MessageView {
   muted: boolean;
   /** A snoozed message comes back at this UTC time (section 18.2). */
   snoozed_until: number | null;
+  /** How Unsubscribe acts, when the message has List-Unsubscribe (section 18.7). */
+  unsubscribe: UnsubscribeMethod | null;
 }
+
+/** Section 18.7, in preference order. */
+export type UnsubscribeMethod = "one_click" | "mailto" | "https";
+
+/** message.unsubscribe: what was done. A mailto draft opens in its compose window. */
+export interface UnsubscribeOutcome {
+  method: UnsubscribeMethod;
+  draft?: DraftView;
+  url?: string;
+}
+
+/** settings.get and settings.set values (src/lib/settings.ts has the keys). */
+export type SettingValue = boolean | number | string;
 
 /** message.set_flags: a field left out is unchanged. */
 export interface FlagChange {
@@ -500,6 +520,22 @@ export const commands = {
   /** Fills an empty subject; the composer puts the returned body at the cursor (18.4). */
   "draft.apply_template": (draft_id: number, template_id: number) =>
     call<TemplateView>("draft_apply_template", { draft_id, template_id }),
+  /** Settings, Privacy: the senders an account always loads images from (SPEC_GAPS G79). */
+  "images.list_allowed": (account_id: number) => call<string[]>("images_list_allowed", { account_id }),
+  "images.disallow_sender": (account_id: number, address: string) =>
+    call<null>("images_disallow_sender", { account_id, address }),
+  /** Drops cached bodies and attachment files, never headers (invariant 7). */
+  "storage.clear_body_cache": () => call<null>("storage_clear_body_cache"),
+  "settings.get": (key: string) => call<SettingValue>("settings_get", { key }),
+  "settings.set": (key: string, value: SettingValue) => call<SettingValue>("settings_set", { key, value }),
+  /** Only after the user's click and confirmation (section 18.7). */
+  "message.unsubscribe": (message_id: number) => call<UnsubscribeOutcome>("message_unsubscribe", { message_id }),
+  /** Opens the print dialog over the print view, laid out first (section 18.8). */
+  "message.print": (target: { message_id: number } | { thread_id: number }) =>
+    call<null>("message_print", {
+      message_id: "message_id" in target ? target.message_id : null,
+      thread_id: "thread_id" in target ? target.thread_id : null,
+    }),
 } as const;
 
 /** Event payloads (section 3, event table). */
@@ -513,6 +549,16 @@ export interface EventMap {
   "op-failed": { account_id: number; op_id: number; kind: OpKind; error: AppError };
   "oauth-done": { account_id: number; ok: boolean; error: AppError | null };
   "snooze-due": { account_id: number; message_id: number };
+  /** count above 1: "N new messages in <account>", message_id the newest (SPEC_GAPS G82). */
+  notify: {
+    account_id: number;
+    message_id: number;
+    sender: string;
+    subject: string;
+    preview: string | null;
+    count: number;
+    account_name: string;
+  };
   "outbox-state": {
     outbox_id: number;
     account_id: number;

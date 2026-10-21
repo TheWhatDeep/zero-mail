@@ -65,6 +65,12 @@ pub fn init(data_dir: &Path) -> io::Result<()> {
 }
 
 /// Turns the IMAP and SMTP traces on or off. Connections opened afterwards follow it.
+/// A warning from the app layer, which has no logger of its own. `what` is a fixed
+/// description; `detail` must hold no message content or secret (section 13.8).
+pub fn app_warning(what: &'static str, detail: &str) {
+    tracing::warn!(detail, "{what}");
+}
+
 pub fn set_debug(debug: bool) {
     if let Some(handle) = RELOAD.get() {
         let _ = handle.reload(filter(debug));

@@ -13,7 +13,10 @@ pub mod features;
 mod lists;
 pub mod logging;
 mod mailbox;
+pub mod notify;
 pub mod search;
+pub mod settings;
+pub mod unsubscribe;
 pub mod views;
 
 pub use crate::core::{
@@ -25,6 +28,8 @@ pub use mail_imap::ImapClient;
 pub use mail_render::{empty_response, BodyResponse};
 pub use mail_secrets::Keychain;
 pub use mail_smtp::SmtpClient;
+/// Setting values (`settings.get`, `settings.set`).
+pub use serde_json::Value as JsonValue;
 
 pub use accounts::{
     AccountConfig, AccountSummary, Accounts, AuthKind, Candidate, ConfigSource, Endpoint, Security,

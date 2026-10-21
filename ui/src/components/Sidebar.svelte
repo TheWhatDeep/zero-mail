@@ -123,6 +123,15 @@
       <span class="icon"><Icon name="plus" size="--icon-17" /></span>
       <span class="name">{strings.addAccount}</span>
     </button>
+    <button
+      class="item tint"
+      class:is-active={app.settingsOpen}
+      aria-current={app.settingsOpen ? "page" : undefined}
+      onclick={() => ((app.form = null), (app.settingsOpen = true))}
+    >
+      <span class="icon"></span>
+      <span class="name">{strings.settings}</span>
+    </button>
   </footer>
 </nav>
 

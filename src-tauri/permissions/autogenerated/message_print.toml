@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-print"
+description = "Enables the message_print command without any pre-configured scope."
+commands.allow = ["message_print"]
+
+[[permission]]
+identifier = "deny-message-print"
+description = "Denies the message_print command without any pre-configured scope."
+commands.deny = ["message_print"]

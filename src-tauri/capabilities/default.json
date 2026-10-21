@@ -69,6 +69,13 @@
     "allow-templates-save",
     "allow-templates-delete",
     "allow-draft-apply-template",
+    "allow-images-list-allowed",
+    "allow-images-disallow-sender",
+    "allow-storage-clear-body-cache",
+    "allow-settings-get",
+    "allow-settings-set",
+    "allow-message-unsubscribe",
+    "allow-message-print",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

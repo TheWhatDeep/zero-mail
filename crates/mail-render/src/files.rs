@@ -181,6 +181,19 @@ impl AttachmentCache {
         Ok(())
     }
 
+    /// Drops every cached file (Clear body cache, invariant 7; SPEC_GAPS G79).
+    pub fn clear_all(&self) -> std::io::Result<()> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Ok(());
+        };
+        for e in entries.filter_map(Result::ok) {
+            if e.path().is_file() {
+                std::fs::remove_file(e.path())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Drops one account's cached files (account removal, section 5).
     pub fn remove_account(&self, account_id: i64) -> std::io::Result<()> {
         let prefix = format!("{account_id}-");

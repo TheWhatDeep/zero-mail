@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-storage-clear-body-cache"
+description = "Enables the storage_clear_body_cache command without any pre-configured scope."
+commands.allow = ["storage_clear_body_cache"]
+
+[[permission]]
+identifier = "deny-storage-clear-body-cache"
+description = "Denies the storage_clear_body_cache command without any pre-configured scope."
+commands.deny = ["storage_clear_body_cache"]

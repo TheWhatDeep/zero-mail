@@ -38,6 +38,10 @@ const DB_FILE: &str = "mail.db";
 const CACHE_DIR: &str = "attachments";
 /// Attachments the user opens (section 13.5; SPEC_GAPS G57).
 const TEMP_DIR: &str = "tmp";
+/// The unread count follows changes at most this often (section 11).
+pub const UNREAD_DELAY: Duration = Duration::from_millis(250);
+/// The largest image attachment the lightbox shows (section 18.9).
+pub const PREVIEW_MAX_BYTES: u64 = 20 * 1024 * 1024;
 /// Schemes `link.open` hands to the OS (section 8, Links; SPEC_GAPS G52). `mailto` opens
 /// compose instead.
 const LINK_SCHEMES: &[&str] = &["http", "https", "tel"];
@@ -140,6 +144,18 @@ pub enum CoreEvent {
         account_id: AccountId,
         message_id: MessageId,
     },
+    /// A new message qualifies for a notification (section 11). `count` above 1 is a
+    /// coalesced "N new messages in <account>", and `message_id` the newest of them
+    /// (SPEC_GAPS G82). `preview` only when the preview setting is on.
+    Notify {
+        account_id: AccountId,
+        message_id: MessageId,
+        sender: String,
+        subject: String,
+        preview: Option<String>,
+        count: u32,
+        account_name: String,
+    },
     /// A browser sign-in ended: tokens saved and Test connection passed, or why not
     /// (section 3; SPEC_GAPS G71).
     OauthDone {
@@ -163,6 +179,7 @@ impl CoreEvent {
             Self::OpFailed { .. } => "op-failed",
             Self::OauthDone { .. } => "oauth-done",
             Self::SnoozeDue { .. } => "snooze-due",
+            Self::Notify { .. } => "notify",
         }
     }
 }
@@ -201,12 +218,19 @@ pub struct Core<I, S, H> {
     pub(crate) moved_in: Mutex<HashMap<String, Instant>>,
     /// New messages whose rules wait for the body (section 18.6).
     pub(crate) rules_waiting: Mutex<HashSet<MessageId>>,
+    /// New messages waiting for body rules before they may notify, by account (section 11).
+    pub(crate) notify_waiting: Mutex<HashMap<MessageId, AccountId>>,
+    /// Notification coalescing and its flush timer (section 11).
+    pub(crate) notices: Mutex<crate::notify::Coalescer>,
+    pub(crate) notice_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Submission for the outbox (section 7).
     pub(crate) smtp: S,
     /// The undo window and upload delay (section 7).
     timing: Mutex<crate::compose::Timing>,
     /// One pending draft upload per draft (section 7, Drafts).
     pub(crate) upload_timers: Mutex<HashMap<mail_store::DraftId, tokio::task::JoinHandle<()>>>,
+    /// Wakes the unread watcher (section 11).
+    unread_wake: Arc<tokio::sync::Notify>,
     /// Wakes the outbox runner when something is queued.
     pub(crate) outbox_wake: Arc<tokio::sync::Notify>,
     /// This core, for tasks that call back into it.
@@ -303,6 +327,19 @@ where
             RemoteProxy::new().map_err(|e| AppError::new(ErrorCode::Internal, e.to_string()))?;
         let (tx, rx) = mpsc::unbounded_channel();
         let states: States = Arc::default();
+        // What changes the unread count wakes its watcher (section 11).
+        let unread_wake: Arc<tokio::sync::Notify> = Arc::default();
+        let inner = sink;
+        let wake = Arc::clone(&unread_wake);
+        let sink: EventSink = Arc::new(move |event: CoreEvent| {
+            if matches!(
+                event,
+                CoreEvent::StoreChanged { .. } | CoreEvent::AccountState { .. }
+            ) {
+                wake.notify_one();
+            }
+            inner(event);
+        });
         let deps = SyncDeps {
             store: store.clone(),
             connector: Arc::new(config.imap.clone()),
@@ -330,7 +367,11 @@ where
             sign_ins: Mutex::default(),
             moved_in: Mutex::default(),
             rules_waiting: Mutex::default(),
+            notify_waiting: Mutex::default(),
+            notices: Mutex::default(),
+            notice_timer: Mutex::default(),
             outbox_wake: Arc::default(),
+            unread_wake,
             me: std::sync::OnceLock::new(),
             store,
             deps,
@@ -653,6 +694,7 @@ where
         let mut view = views::message_view(&message, &attachments, info);
         view.muted = self.store.thread_muted(message.thread_id).await?;
         view.snoozed_until = self.store.get_snooze(message_id).await?.map(|s| s.due_utc);
+        view.unsubscribe = self.unsubscribe_targets(message_id).await?.method();
         if let Some(stored) = self.store.gm_labels(message_id).await? {
             // The labels are the folders the message is in (section 18.1), read from the
             // rows, so a label just added or removed shows at once.
@@ -708,6 +750,94 @@ where
         Ok(())
     }
 
+    /// Unread INBOX messages over every enabled account: the window title, the tray tooltip
+    /// and the taskbar badge (section 11).
+    pub async fn unread_total(&self) -> Result<u32, AppError> {
+        Ok(self.store.unread_total().await?)
+    }
+
+    /// Calls `show` with the unread total now and after every change that can move it,
+    /// at most every [`UNREAD_DELAY`], until shutdown.
+    pub fn watch_unread(&self, show: impl Fn(u32) + Send + Sync + 'static) {
+        let store = self.store.clone();
+        let wake = Arc::clone(&self.unread_wake);
+        let task = tokio::spawn(async move {
+            let mut last = None;
+            loop {
+                tokio::time::sleep(UNREAD_DELAY).await;
+                match store.unread_total().await {
+                    Ok(n) if last != Some(n) => {
+                        last = Some(n);
+                        show(n);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "unread count failed"),
+                }
+                wake.notified().await;
+            }
+        });
+        lock(&self.background).push(task);
+    }
+
+    /// `images.list_allowed`: the senders an account always loads images from (Settings,
+    /// Privacy; SPEC_GAPS G79).
+    pub async fn images_list_allowed(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<String>, AppError> {
+        self.store.get_account(account_id).await?;
+        Ok(self.store.remote_image_senders(account_id).await?)
+    }
+
+    /// `images.disallow_sender`: removes a sender from that allowlist.
+    pub async fn images_disallow_sender(
+        &self,
+        account_id: AccountId,
+        address: &str,
+    ) -> Result<(), AppError> {
+        self.store
+            .disallow_remote_images(account_id, address.trim().to_string())
+            .await?;
+        Ok(())
+    }
+
+    /// `storage.clear_body_cache` (invariant 7): bodies and attachment files go, headers
+    /// stay; an open message fetches its body again.
+    pub async fn storage_clear_body_cache(&self) -> Result<(), AppError> {
+        let dropped = self.store.clear_bodies().await?;
+        let cache = self.cache.clone();
+        blocking(move || cache.clear_all()).await?;
+        tracing::info!(bodies = dropped, "body cache cleared");
+        for account in self.store.list_accounts().await? {
+            self.emit(CoreEvent::StoreChanged {
+                account_id: account.id,
+                folder_id: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// `message.print`: checks the message or thread exists; the app then opens the
+    /// webview's print dialog over the UI's print view (section 18.8).
+    pub async fn message_print(
+        &self,
+        message_id: Option<MessageId>,
+        thread_id: Option<mail_store::ThreadId>,
+    ) -> Result<(), AppError> {
+        match (message_id, thread_id) {
+            (Some(id), None) => {
+                self.store.get_message(id).await?;
+            }
+            (None, Some(thread)) => {
+                if self.store.thread_copies(thread).await?.is_empty() {
+                    return Err(AppError::new(ErrorCode::NotFound, "no such thread"));
+                }
+            }
+            _ => return Err(AppError::invalid("a message or a thread")),
+        }
+        Ok(())
+    }
+
     /// The `mail-body` protocol response for `mail-body://<message>?<query>`. `images=1`
     /// counts only for a message whose images are allowed (SPEC_GAPS G57).
     pub async fn mail_body(
@@ -735,6 +865,11 @@ where
         let Some((id, cid)) = path.split_once('/') else {
             return mail_render::empty_response(400);
         };
+        // `<message>/attachment/<id>`: an image attachment for the lightbox (section 18.9).
+        // A real Content-ID with a slash arrives percent-encoded, so this cannot collide.
+        if let Some(attachment) = cid.strip_prefix("attachment/") {
+            return self.attachment_image(id, attachment).await;
+        }
         let (Ok(message_id), cid) = (id.parse::<MessageId>(), mail_render::urls::decode(cid))
         else {
             return mail_render::empty_response(400);
@@ -752,6 +887,33 @@ where
         let Some(record) = found else {
             return mail_render::empty_response(404);
         };
+        match self.attachment_bytes(&record).await {
+            Ok(bytes) => mail_render::image_response(&record.attachment.mime, bytes),
+            Err(_) => mail_render::empty_response(502),
+        }
+    }
+
+    /// An `image/*` attachment of at most 20 MB, for the lightbox (section 18.9).
+    async fn attachment_image(&self, message: &str, attachment: &str) -> BodyResponse {
+        let (Ok(message_id), Ok(attachment_id)) = (
+            message.parse::<MessageId>(),
+            attachment.parse::<AttachmentId>(),
+        ) else {
+            return mail_render::empty_response(400);
+        };
+        let Ok(record) = self.store.get_attachment(attachment_id).await else {
+            return mail_render::empty_response(404);
+        };
+        if record.message_id != message_id
+            || !record
+                .attachment
+                .mime
+                .to_ascii_lowercase()
+                .starts_with("image/")
+            || record.attachment.size > PREVIEW_MAX_BYTES
+        {
+            return mail_render::empty_response(404);
+        }
         match self.attachment_bytes(&record).await {
             Ok(bytes) => mail_render::image_response(&record.attachment.mime, bytes),
             Err(_) => mail_render::empty_response(502),
@@ -917,6 +1079,9 @@ where
     pub async fn shutdown(&self) {
         for task in lock(&self.background).drain(..) {
             task.abort();
+        }
+        if let Some(timer) = lock(&self.notice_timer).take() {
+            timer.abort();
         }
         if let Err(e) = self.temp.clear() {
             tracing::warn!(error = %e, "could not clear the temp folder");

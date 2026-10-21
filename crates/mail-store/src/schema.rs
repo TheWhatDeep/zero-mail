@@ -14,7 +14,7 @@ use crate::error::{Result, StoreError};
 use rusqlite::{Connection, TransactionBehavior};
 
 /// Every migration, in order. Never edit a released entry; append a new one.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 /// Applies every migration the database has not seen yet. Returns the version the database
 /// had before, so data steps that SQL alone cannot do run once (threading, M9).
@@ -47,6 +47,12 @@ pub(crate) fn migrate_with(conn: &mut Connection, migrations: &[&str]) -> Result
     }
     Ok(())
 }
+
+/// Version 4 (M10): the List-Unsubscribe headers, for the Unsubscribe button (SPEC_GAPS G78).
+const V4: &str = "
+ALTER TABLE messages ADD COLUMN list_unsubscribe TEXT;
+ALTER TABLE messages ADD COLUMN list_unsubscribe_post TEXT;
+";
 
 /// Version 3 (M9): threading by References (SPEC_GAPS G74), the sync window start (G75) and
 /// List-Id for rules (G76). Existing windows start at their oldest cached message, as Load

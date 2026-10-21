@@ -153,6 +153,8 @@ async fn main() {
             refs: None,
             gm_labels: None,
             list_id: None,
+            list_unsubscribe: None,
+            list_unsubscribe_post: None,
             thread_id: 0,
             subject,
             from: Address {

@@ -99,6 +99,8 @@ pub fn message(uid: u32, date_utc: i64, thread_id: ThreadId) -> NewMessage {
         refs: None,
         gm_labels: None,
         list_id: None,
+        list_unsubscribe: None,
+        list_unsubscribe_post: None,
         thread_id,
         subject: format!("Subject {uid}"),
         from: Address {

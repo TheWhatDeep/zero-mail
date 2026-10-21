@@ -228,8 +228,19 @@ pub(crate) async fn runner<I, S, H>(
                 } => c.on_new_mail(account_id, folder_id, message_ids).await,
                 SyncEvent::BodyStored { message_id, .. } => {
                     let waiting = lock(&c.rules_waiting).remove(&message_id);
-                    if waiting {
-                        c.apply_rules(vec![message_id]).await;
+                    let quiet = if waiting {
+                        c.apply_rules(vec![message_id]).await
+                    } else {
+                        HashSet::new()
+                    };
+                    // Its rules done and its preview stored, it may notify (section 11).
+                    let notify = if lock(&c.rules_waiting).contains(&message_id) {
+                        None
+                    } else {
+                        lock(&c.notify_waiting).remove(&message_id)
+                    };
+                    if let Some(account_id) = notify {
+                        c.notify_new(account_id, vec![message_id], &quiet).await;
                     }
                 }
                 _ => {}
@@ -299,9 +310,11 @@ where
                 tracing::warn!(code = ?e.code, account_id, "muted messages not archived");
             }
         }
-        if !rules_for.is_empty() {
-            self.apply_rules(rules_for).await;
+        if rules_for.is_empty() {
+            return;
         }
+        let quiet = self.apply_rules(rules_for.clone()).await;
+        self.notify_after_rules(account_id, rules_for, quiet).await;
     }
 
     // Snooze (18.2).
@@ -585,17 +598,19 @@ where
     }
 
     /// Runs the rules once per message, in order (section 18.6). Messages whose rules need
-    /// a body wait until it is stored. Actions are batched into ops per folder.
-    pub(crate) async fn apply_rules(&self, ids: Vec<MessageId>) {
+    /// a body wait until it is stored. Actions are batched into ops per folder. Returns the
+    /// messages a Never notify rule matched (section 11).
+    pub(crate) async fn apply_rules(&self, ids: Vec<MessageId>) -> HashSet<MessageId> {
+        let mut quiet = HashSet::new();
         let rules: Vec<RuleView> = match self.rules_list().await {
             Ok(r) => r.into_iter().filter(|r| r.enabled).collect(),
-            Err(_) => return,
+            Err(_) => return quiet,
         };
         if rules.is_empty() || ids.is_empty() {
-            return;
+            return quiet;
         }
         let Ok(facts) = self.store.rule_facts(ids).await else {
-            return;
+            return quiet;
         };
         let mut marks = Vec::new();
         let mut plans: Vec<(RuleFacts, Plan)> = Vec::new();
@@ -611,6 +626,9 @@ where
                     continue;
                 }
                 if applied.contains(&rule.id) {
+                    if rule.actions.contains(&Action::NeverNotify) {
+                        quiet.insert(f.id);
+                    }
                     if rule.stop_processing {
                         break;
                     }
@@ -633,8 +651,9 @@ where
                         Action::Label { folder } => plan.labels.push(folder.clone()),
                         Action::Move { folder } => plan.move_to = Some(folder.clone()),
                         Action::Delete => plan.delete = true,
-                        // Read by notifications (M10) from `rules_applied`.
-                        Action::NeverNotify => {}
+                        Action::NeverNotify => {
+                            quiet.insert(f.id);
+                        }
                     }
                 }
                 if rule.stop_processing {
@@ -653,6 +672,7 @@ where
         if let Err(e) = self.carry_out(plans).await {
             tracing::warn!(code = ?e.code, "rule actions not queued");
         }
+        quiet
     }
 
     /// Queues the rules' actions, batched: flags, labels and mute first, then the move or

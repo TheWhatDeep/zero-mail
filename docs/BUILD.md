@@ -1,6 +1,6 @@
 # BUILD.md — Lightweight Desktop Email Client
 
-Spec v0.19 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
+Spec v0.20 (build-ready), amended 2026-10-20 with the owner decisions recorded in SPEC_GAPS.md. This file is the complete contract between Deep (owner) and Claude Code (builder). Part A tells the agent how to work. Part B is the specification. Where this file is silent, the agent stops and asks; it never improvises.
 
 ---
 
@@ -182,6 +182,8 @@ Core (Rust) — higher rows call lower rows, never the reverse
 | `attachment.open`, `attachment.save` | attachment_id, path? (none: native Save dialog, G54) | none |
 | `link.open` | url (`http`, `https` or `tel` only) | none; opens the system browser or handler (SPEC_GAPS G52) |
 | `images.allow_once`, `images.allow_sender` | message_id | none |
+| `images.list_allowed`, `images.disallow_sender` | account_id, address | the account's allowlisted senders (Settings, Privacy; SPEC_GAPS G79) |
+| `storage.clear_body_cache` | none | none; drops cached bodies and attachment files, never headers (invariant 7; SPEC_GAPS G79) |
 | `compose.new`, `compose.reply`, `compose.reply_all`, `compose.forward` | message_id?, mode | draft_id and prefilled draft; the app opens the draft's compose window (SPEC_GAPS G63) |
 | `identity.list`, `identity.save`, `identity.delete` | account_id, identity, identity_id | identities; one default per account, never zero (SPEC_GAPS G64) |
 | `draft.save`, `draft.discard`, `draft.add_attachment`, `draft.remove_attachment`, `draft.apply_template` | draft_id, content | none |
@@ -226,7 +228,8 @@ folders(id, account_id, path, delimiter, special_use NULL /* inbox sent drafts t
 messages(id, account_id, folder_id, uid, gm_msgid NULL, gm_thrid NULL, message_id, in_reply_to NULL, refs NULL,
   gm_labels_json NULL, thread_id, subject, from_name, from_addr, to_json, cc_json, reply_to_json,
   date_utc, internal_utc, size, flags /* bit0 seen, 1 flagged, 2 answered, 3 draft, 4 forwarded, 5 deleted or pending move/delete (hidden, SPEC_GAPS G19, G59) */,
-  has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, list_id NULL /* SPEC_GAPS G76 */, UNIQUE(folder_id, uid))
+  has_attach, preview, body_state /* none | text (a part cut at 1 MB) | full (every text part whole), SPEC_GAPS G35 */, list_id NULL /* SPEC_GAPS G76 */,
+  list_unsubscribe NULL, list_unsubscribe_post NULL /* SPEC_GAPS G78 */, UNIQUE(folder_id, uid))
 bodies(message_id, text_plain, text_html, fetched_at)
 attachments(id, message_id, part_id, filename, mime, size, content_id NULL, is_inline)
 threads(id, account_id, last_date_utc, subject_norm)
@@ -482,9 +485,9 @@ Three panes, keyboard-first, no animation that costs frames. The window title an
 | `Ctrl/Cmd+P` | Print |
 | `Ctrl/Cmd+,` | Settings |
 
-**Notifications.** For new unread mail in INBOX or watched folders, when the window is unfocused or hidden. Never during a folder's first sync, and only for messages whose INTERNALDATE is within the last 30 minutes. One notification per message; more than 3 within 10 s coalesce into N new messages in <account>. Content is sender and subject; body preview is off by default. Click focuses the app on that message. On or off per account. Muted threads and rules with Never notify suppress it.
+**Notifications.** For new unread mail in INBOX or watched folders, when the window is unfocused or hidden. Never during a folder's first sync, and only for messages whose INTERNALDATE is within the last 30 minutes. One notification per message; more than 3 within 10 s coalesce into N new messages in <account>. Content is sender and subject; body preview is off by default. Click focuses the app on that message: the official plugin reports no click on desktop, so the app opens the newest notified message when its window comes to the front within 10 s of a notification (SPEC_GAPS G80). On or off per account. Muted threads and rules with Never notify suppress it.
 
-**Background.** Setting Keep running in tray when the window closes, default on. Tray menu: Open, Compose, Quit. Unread badge on the dock or taskbar where the OS supports it. Autostart is off by default. A second launch focuses the running instance.
+**Background.** Setting Keep running in tray when the window closes, default on. Tray menu: Open, Compose, Quit. Unread badge on the dock or taskbar where the OS supports it; on Windows a dot overlay while anything is unread, with the count in the title and tray tooltip (SPEC_GAPS G81). Autostart is off by default. A second launch focuses the running instance.
 
 **Look.** Light, dark or system theme via CSS variables in one `tokens.css` (visual language: the Dispatch design handoff, screen 3a, with glass flattened to opaque surfaces). Comfortable or compact density. Geist bundled locally, system stack as fallback. Message bodies stay on white. Inline SVG icons (Phosphor regular, MIT). Motion: fades and scale pop-ins only, 150 ms or less, none under `prefers-reduced-motion`.
 
@@ -769,6 +772,7 @@ Gmail is a service plus a client. This app targets parity with the client half: 
 
 | Version | Date | Change |
 | --- | --- | --- |
+| v0.20 | 2026-10-21 | Owner decisions (SPEC_GAPS G78 to G81): columns `messages.list_unsubscribe` and `list_unsubscribe_post`; commands `images.list_allowed`, `images.disallow_sender` and `storage.clear_body_cache`; a notification click opens the newest notified message; a dot overlay on the Windows taskbar. |
 | v0.19 | 2026-10-20 | Owner decisions (SPEC_GAPS G74 to G76): table `message_refs` for threading; column `folders.window_start` for the sync window; column `messages.list_id` for rules. |
 | v0.18 | 2026-10-20 | Owner decision (SPEC_GAPS G73): Zero Mail becomes a public app. A verified Google client shipped with the app, Microsoft 365 and Outlook.com through Microsoft OAuth, and MX discovery go into a new M11; packaging becomes M12. M8 to M10 continue as specified. |
 | v0.17 | 2026-10-20 | Owner decisions (SPEC_GAPS G23, G70, G71): `bcc:` through local Bcc lists; the Google client secret in the keychain; OAuth accounts are saved, then signed in. |

@@ -68,6 +68,14 @@ const COMMANDS: &[&str] = &[
     "templates_save",
     "templates_delete",
     "draft_apply_template",
+    // M10 (section 3; SPEC_GAPS G79).
+    "images_list_allowed",
+    "images_disallow_sender",
+    "storage_clear_body_cache",
+    "settings_get",
+    "settings_set",
+    "message_unsubscribe",
+    "message_print",
 ];
 
 fn main() {

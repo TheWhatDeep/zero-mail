@@ -217,6 +217,9 @@
   }
 
   onMount(() => {
+    // j and k (section 11 table).
+    const step = (delta: number) => void move((selectedIndex ?? -1) + delta);
+    app.listMove = step;
     rowHeight = cssPx("--row-height", 50);
     headerHeight = cssPx("--list-header-height", 41);
     answerScrollRequests(() => scroller ?? null);
@@ -227,7 +230,11 @@
       },
       () => total,
     );
-    if (!scroller) return;
+    if (!scroller) {
+      return () => {
+        if (app.listMove === step) app.listMove = null;
+      };
+    }
     const el = scroller;
     const resize = new ResizeObserver(() => (viewport = el.clientHeight));
     resize.observe(el);
@@ -235,6 +242,7 @@
     return () => {
       resize.disconnect();
       clearTimeout(pending);
+      if (app.listMove === step) app.listMove = null;
     };
   });
 </script>
@@ -250,7 +258,11 @@
       </button>
     {:else}
       <label class="toggle">
-        <input type="checkbox" bind:checked={app.grouped} />
+        <input
+          type="checkbox"
+          checked={app.grouped}
+          onchange={(e) => app.setGrouped((e.currentTarget as HTMLInputElement).checked)}
+        />
         <span>{strings.groupByConversation}</span>
       </label>
     {/if}
@@ -326,7 +338,11 @@
               selected={app.message === r.id}
               top={rowTop(i, layout)}
               {now}
-              onselect={(row) => select(row, i)}
+              onselect={(row) => {
+                select(row, i);
+                // Reading pane off: a click opens the message in its own view (section 11).
+                if (app.ui.readingPane === "off") app.fullView = true;
+              }}
             />
           {:else}
             <div class="skeleton-row placed" style:transform={`translateY(${rowTop(i, layout)}px)`} aria-hidden="true">

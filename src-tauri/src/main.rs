@@ -14,6 +14,10 @@
 //! The opener and dialog plugins are used from Rust only: `link.open`, `attachment.open`
 //! and `log.open` hand a checked URL or path to the OS, and Save as opens the native dialog
 //! when the page passes no path (SPEC_GAPS G52, G54). The page has no plugin permission.
+//! So are notification, single-instance and autostart (section 11): see `shell`.
+
+mod shell;
+mod strings;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -23,9 +27,11 @@ use std::time::{Duration, Instant};
 use mail_core::compose::{DraftContent, DraftView, IdentityView, OutboxView};
 use mail_core::features::{RuleView, TemplateView};
 use mail_core::search::SearchRequest;
+use mail_core::unsubscribe::Outcome;
 use mail_core::views::{
     AddressView, FlagChange, FolderView, ListRequest, MessageView, PageView, Role,
 };
+use mail_core::JsonValue;
 use mail_core::{
     AccountConfig, AccountSummary, AccountView, AppError, Candidate, Core, CoreConfig, CoreEvent,
     ErrorCode, EventSink, HttpClient, ImapClient, Keychain, SmtpClient, TestReport,
@@ -102,6 +108,24 @@ const PERF_SCROLL_ENV: &str = "ZEROMAIL_PERF_SCROLL";
 const PERF_WALK_ENV: &str = "ZEROMAIL_PERF_WALK";
 /// Set by the perf harness and tests: a data directory instead of the OS app-data one.
 const DATA_DIR_ENV: &str = "ZEROMAIL_DATA_DIR";
+/// T35 harness only (tests/shell/single-instance.mjs): the running instance writes `ready`
+/// when started and `focused` when a second launch hands over to it.
+const INSTANCE_OUT_ENV: &str = "ZEROMAIL_INSTANCE_OUT";
+
+/// Appends one line to the T35 harness file, when there is one.
+fn instance_note(line: &str) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os(INSTANCE_OUT_ENV) else {
+        return;
+    };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    if let Ok(mut f) = file {
+        let _ = writeln!(f, "{line}");
+    }
+}
 
 #[tauri::command(rename_all = "snake_case")]
 async fn account_list(core: tauri::State<'_, CoreState>) -> Result<Vec<AccountView>, AppError> {
@@ -217,6 +241,84 @@ async fn images_allow_sender(
     message_id: i64,
 ) -> Result<(), AppError> {
     core.0.images_allow_sender(message_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn images_list_allowed(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+) -> Result<Vec<String>, AppError> {
+    core.0.images_list_allowed(account_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn images_disallow_sender(
+    core: tauri::State<'_, CoreState>,
+    account_id: i64,
+    address: String,
+) -> Result<(), AppError> {
+    core.0.images_disallow_sender(account_id, &address).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn storage_clear_body_cache(core: tauri::State<'_, CoreState>) -> Result<(), AppError> {
+    core.0.storage_clear_body_cache().await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn settings_get(
+    core: tauri::State<'_, CoreState>,
+    key: String,
+) -> Result<JsonValue, AppError> {
+    core.0.settings_get(&key).await
+}
+
+/// Keep running in tray and autostart also change the shell at once.
+#[tauri::command(rename_all = "snake_case")]
+async fn settings_set(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    key: String,
+    value: JsonValue,
+) -> Result<JsonValue, AppError> {
+    let stored = core.0.settings_set(&key, value).await?;
+    shell::setting_changed(&app, &key, &stored);
+    Ok(stored)
+}
+
+/// `message.unsubscribe` (section 18.7): a mailto draft opens its compose window, an https
+/// page opens in the system browser; one-click was already POSTed by Core.
+#[tauri::command(rename_all = "snake_case")]
+async fn message_unsubscribe(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: i64,
+) -> Result<Outcome, AppError> {
+    let outcome = core.0.message_unsubscribe(message_id).await?;
+    if let Some(draft) = &outcome.draft {
+        open_compose(&app, draft)?;
+    }
+    if let Some(url) = &outcome.url {
+        let url = core.0.link_check(url)?;
+        app.opener().open_url(url, None::<&str>).map_err(os_error)?;
+    }
+    Ok(outcome)
+}
+
+/// `message.print` (section 18.8): the page has laid out its print view; this opens the
+/// webview's print dialog over it.
+#[tauri::command(rename_all = "snake_case")]
+async fn message_print(
+    app: AppHandle,
+    core: tauri::State<'_, CoreState>,
+    message_id: Option<i64>,
+    thread_id: Option<i64>,
+) -> Result<(), AppError> {
+    core.0.message_print(message_id, thread_id).await?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| AppError::new(ErrorCode::Internal, "no main window"))?;
+    main.print().map_err(os_error)
 }
 
 fn os_error(e: impl std::fmt::Display) -> AppError {
@@ -839,13 +941,24 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
 fn main() {
     let started = Instant::now();
     let built = tauri::Builder::default()
+        // First, so a second launch focuses this one and goes no further (section 11, T35).
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            shell::show_main(app);
+            instance_note("focused");
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             let dir = data_dir(app)?;
             mail_core::logging::init(&dir).map_err(os_error)?;
             let handle = app.handle().clone();
             let sink: EventSink = Arc::new(move |event: CoreEvent| {
+                shell::on_event(&handle, &event);
                 let _ = handle.emit(event.name(), &event);
             });
             let core = tauri::async_runtime::block_on(Core::start(
@@ -858,9 +971,15 @@ fn main() {
                 },
                 sink,
             ))?;
+            let keep_in_tray = tauri::async_runtime::block_on(
+                core.settings_get(mail_core::settings::KEEP_IN_TRAY),
+            )?;
             app.manage(CoreState(core));
             app.manage(Closing::default());
+            app.manage(shell::Shell::new(keep_in_tray.as_bool() == Some(true)));
+            shell::setup(app)?;
             perf_hooks(app, started)?;
+            instance_note("ready");
             Ok(())
         })
         .register_asynchronous_uri_scheme_protocol("mail-body", |ctx, request, responder| {
@@ -962,9 +1081,21 @@ fn main() {
             templates_save,
             templates_delete,
             draft_apply_template,
+            images_list_allowed,
+            images_disallow_sender,
+            storage_clear_body_cache,
+            settings_get,
+            settings_set,
+            message_unsubscribe,
+            message_print,
         ])
         // A compose window that closes uploads its draft now (section 7, Drafts).
         .on_window_event(|window, event| {
+            if let (tauri::WindowEvent::CloseRequested { api, .. }, "main") =
+                (event, window.label())
+            {
+                shell::main_close_requested(window, api);
+            }
             if let (tauri::WindowEvent::CloseRequested { api, .. }, Some(draft_id)) =
                 (event, compose_draft(window.label()))
             {

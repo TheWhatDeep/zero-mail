@@ -163,6 +163,11 @@
   /* Layout */
   --sidebar-width: 240px;
   --reading-width: 420px;
+  /* The print view's laid-out width (section 18.8). */
+  --print-width: 720px;
+  /* Settings: the section list and a template's text preview. */
+  --settings-nav-width: 200px;
+  --template-preview-height: 160px;
   --control-height: 40px;
   --button-height: 34px;
   --button-height-small: 28px;

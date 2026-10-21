@@ -825,3 +825,86 @@ None from spec v0.19. v0.19 records the owner's decisions G74 to G76.
   - T38 saw an item marked `sent` before its `sent_at` was written, which was a second write. `sent_at` is now set in the same statement that marks the item sent.
   - `npm audit` reported a high-severity advisory in vite 8.3.0 to 8.3.2 (its dev server's `launch-editor`). The UI's pin moved to vite 8.3.4, the fixed patch release.
 
+## M10: done, tagged `m10` (2026-10-21)
+
+Scope: notifications, tray, shortcuts, settings, onboarding, single instance, unsubscribe, print and image preview. Done when: T05 (notification part), T34, T35, T43 and T44.
+
+Every check below passes locally on Windows 10. CI: see the run linked in the commit after this report. T35 starts the app, so it runs only in CI (never on the owner's desktop).
+
+### Built
+- **Spec v0.20 (G78 to G81):**
+  - Schema v4: `messages.list_unsubscribe` and `list_unsubscribe_post`, filled at header fetch.
+  - Commands `images.list_allowed`, `images.disallow_sender` and `storage.clear_body_cache`.
+  - A notification click opens the newest notified message.
+  - A dot overlay on the Windows taskbar while anything is unread.
+- **Settings (`settings.get`, `settings.set`):** one registry in Core with each key's type, allowed values and default (G82). Unknown keys and bad values are `invalid_input`. Debug logging applies at once. The undo-send window (0 to 30 s) is used by `draft.send`.
+- **Notifications (section 11):**
+  - Core decides after mute and the rules: new mail in INBOX or a watched folder, not a first sync, not moved there by this app, unread and visible, no Never notify rule, received within 30 minutes, on for the account.
+  - Messages whose rules wait for the body notify once those rules ran. With the preview on, a notification waits up to 5 s for the body.
+  - More than 3 within 10 s in one account become one "N new messages in <account>".
+  - The app shows the OS notification only while the window is unfocused or hidden. The page opens the notified message when the window comes to the front within 10 s (G80).
+- **Tray and window:**
+  - The tray menu has Open, Compose and Quit; a left click opens the window.
+  - The unread count shows in the window title and tray tooltip, with the Windows dot (G81).
+  - Keep running in tray (on by default) hides the window on close. Autostart is off by default.
+  - A second launch focuses the running instance (single-instance plugin).
+- **Shortcuts (section 11 table):** a pure dispatcher. Single keys are inactive while typing; Ctrl/Cmd combinations and Esc stay active.
+- **Settings screens:**
+  - Accounts, with Gmail's server-side pages linked (section 18 table).
+  - Identities and signatures.
+  - Reading: theme, density, reading pane right, bottom or off, mark as read, HTML, Group by conversation.
+  - Composing (undo send) and Notifications.
+  - Privacy: online lookups, and the image allowlist with Remove.
+  - Rules: create, edit, reorder, enable, Run now, and the Gmail filters link.
+  - Templates.
+  - Sync and storage: folder sync and watch, subject grouping, the snooze folder, Clear body cache, debug logging, the log folder.
+  - Shortcuts (read-only) and About (version, releases link).
+- **Onboarding:** a welcome step before the first add-account form.
+- **Unsubscribe (18.7):** the reader shows Unsubscribe when `List-Unsubscribe` gives a method and asks first. Methods, in order:
+  - One-click POSTs `List-Unsubscribe=One-Click` over HTTPS with no cookie store and no referrer.
+  - `mailto:` opens a prefilled draft.
+  - `https:` opens the system browser.
+- **Print (18.8):** a print view laid out off screen: a header block with subject, from, to, cc and date above each body; a thread oldest first; images only where already allowed. Then `message.print` opens the webview's print dialog.
+- **Image preview (18.9):** image attachments up to 20 MB open in a lightbox over `mail-cid://<message>/attachment/<id>`, with Save and Open externally. Other types still open externally.
+- **Clear body cache (invariant 7):** bodies and attachment files go, headers stay; an opened message downloads again.
+
+### Tests added (17 Rust, 15 UI; workspace total 272 Rust (9 container tests ignored locally) and 81 UI)
+- **T05 (notification part):** one delivered message fires exactly one `notify`, with sender and subject and no preview; none during the first sync. With the preview on, the preview comes along.
+- **What does not notify:** mail received over 30 minutes ago, a Never notify rule, a message already read, a reply in a muted thread (T39), and an account with notifications off. Turned back on, it notifies.
+- **Coalescing:** a burst of 6 shows at most 3 singles and the rest as "N new messages", with the counts adding up to 6. Unit tests cover the window, the flush and separate accounts.
+- **T43:** one-click, `mailto:` and `https:` messages each take their path. The POST carries exactly the RFC 8058 body. Opening a message fires nothing. A refused POST reports `server_rejected`; no header means `unsupported`. Unit tests cover header parsing and unsafe URIs.
+- **T44 (Core part):** a JPEG attachment is served for the lightbox. A PDF, another message's attachment and a bad id are not. Print checks its message or thread.
+- **T44 (page part):** a thread prints oldest first; blocked images stay blocked in print, even with a tampered URL; images over 20 MB and PDFs do not preview.
+- **T34:** every key of the section 11 table, `g` sequences and their window, nothing while typing (Esc and Ctrl/Cmd still act), and the Shortcuts screen lists every action.
+- **T35 (CI):** `tests/shell/single-instance.mjs` starts the release build twice in the Windows job; the second exits, and the first reports it was focused and keeps running.
+- **Settings:** validation and defaults in Core, and through Core: invalid keys and values refused, a value stored. In the page: values that do not fit keep the default; theme and density attributes; mark-as-read timing; the signature's HTML part.
+- **G80:** the newest background notification opens once within 10 s; a coalesced one opens the INBOX; stale or foreground ones do nothing.
+- **Allowlist and Clear body cache:** an allowed sender is listed and removed. After the clear, headers stay and the body downloads again.
+- **Unread count:** INBOX only, follows a change, leaves out a disabled account, and never repeats an unchanged count.
+- **App:** the Windows dot is round and in the accent color; the window title and tooltip strings.
+- **Visual check (browser with stubbed IPC):**
+  - `j` moved the selection; the Unsubscribe confirmation showed with no call made; Settings opened with Ctrl+,.
+  - Reading settings switched to the light theme and the bottom pane; Esc closed Settings.
+  - The lightbox opened and closed with Esc; Ctrl+P laid out the print view with `images=0`, then called `message.print`.
+  - With the reading pane off, a click opened the message's own view; the welcome step showed with no account.
+  - Found and fixed: the Settings screen did not fill the height, and its selects had no names.
+
+### Deviations
+None from spec v0.20. v0.20 records the owner's decisions G78 to G81.
+
+### Gaps found
+- **G78 to G81:** resolved by the owner.
+- **G82** (interpretations, owner to ratify):
+  - the settings registry;
+  - the `notify` payload's extra fields;
+  - which messages notify, and the coalescing;
+  - where notifications show, and the OS-side strings;
+  - the click (G80) and the unread count;
+  - tray and closing;
+  - shortcut details and reading pane off;
+  - print, the image preview and unsubscribe;
+  - details of the Settings screens;
+  - onboarding;
+  - the T35 hook.
+- **Not automated, for the owner's manual round (G25):** the OS toast and its click, the tray menu, the taskbar dot, autostart, keyboard triage in the real app, and the printed page. They are listed in `docs/MANUAL_TESTS.md`.
+

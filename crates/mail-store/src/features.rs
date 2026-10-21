@@ -302,6 +302,65 @@ pub(crate) fn rule_facts(conn: &Connection, ids: &[MessageId]) -> Result<Vec<Rul
     Ok(out)
 }
 
+// Settings screens (M10).
+
+/// The senders an account loads remote images from (Settings, Privacy; SPEC_GAPS G79).
+pub(crate) fn remote_image_senders(conn: &Connection, account: AccountId) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT sender_addr FROM remote_image_allow WHERE account_id = ?1 ORDER BY sender_addr",
+    )?;
+    let rows = stmt.query_map([account], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub(crate) fn disallow_remote_images(
+    tx: &Transaction,
+    account: AccountId,
+    sender: &str,
+) -> Result<()> {
+    tx.execute(
+        "DELETE FROM remote_image_allow WHERE account_id = ?1 AND sender_addr = ?2",
+        params![account, sender],
+    )?;
+    Ok(())
+}
+
+/// Clear body cache (invariant 7): every cached body goes and messages fetch theirs again
+/// when opened; headers stay. Returns how many bodies were dropped.
+pub(crate) fn clear_bodies(tx: &Transaction) -> Result<usize> {
+    tx.execute(
+        "UPDATE messages SET body_state = 'none' WHERE body_state != 'none'",
+        [],
+    )?;
+    Ok(tx.execute("DELETE FROM bodies", [])?)
+}
+
+/// A message's List-Unsubscribe and List-Unsubscribe-Post headers (section 18.7).
+pub(crate) fn unsubscribe_headers(
+    conn: &Connection,
+    message: MessageId,
+) -> Result<(Option<String>, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT list_unsubscribe, list_unsubscribe_post FROM messages WHERE id = ?1",
+        [message],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// Unread messages in the INBOX of every enabled account: the window title, tray and
+/// taskbar count (section 11). A Gmail message counts once.
+pub(crate) fn unread_total(conn: &Connection) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT count(DISTINCT coalesce(m.gm_msgid, -m.id)) FROM messages AS m
+         JOIN folders AS f ON f.id = m.folder_id
+         JOIN accounts AS a ON a.id = m.account_id
+         WHERE f.special_use = 'inbox' AND a.enabled = 1 AND (m.flags & 1) = 0
+           AND (m.flags & ?1) = 0",
+        [HIDDEN],
+        |r| r.get(0),
+    )?)
+}
+
 // Templates (18.4).
 
 pub(crate) fn list_templates(conn: &Connection) -> Result<Vec<TemplateRecord>> {

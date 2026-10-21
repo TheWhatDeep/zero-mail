@@ -607,14 +607,14 @@ Options:
 - **New indexes and test speed:** indexes added with v3: `messages(account_id, gm_msgid)`, `messages(account_id, date_utc, id)` and `threads(account_id, subject_norm)` (indexes are the builder's job, section 4). Test builds compile SQLite's C code optimized, so the T30 timing measures SQLite's real speed.
 - **Settings without a screen:** subject grouping (`threads.subject_merge`, default off), Group by conversation (on), and the snooze settings. Their switches come with Settings in M10, and so do the Rules and Templates management screens (section 11, Settings).
 
-## G78. Unsubscribe needs List-Unsubscribe, which is not stored — Open (blocks M10 unsubscribe)
+## G78. Unsubscribe needs List-Unsubscribe, which is not stored — Resolved 2026-10-21: option (a), two columns
 Section 18.7: an Unsubscribe button shows in the header when `List-Unsubscribe` is present, preferring RFC 8058 one-click (`List-Unsubscribe-Post`). Sync already fetches both headers but stores neither (G76 left them to M10).
 
 Options:
 - (a) **Recommended:** two nullable columns, `messages.list_unsubscribe` and `messages.list_unsubscribe_post`, filled at header fetch. The button shows offline too, and `message.unsubscribe` reads them.
 - (b) Fetch the headers when a message opens (a round trip per open). No button offline, and none until the fetch answers.
 
-## G79. The Privacy and Sync and storage screens need commands — Open (blocks two M10 Settings screens)
+## G79. The Privacy and Sync and storage screens need commands — Resolved 2026-10-21: option (a), three commands
 Section 11 Settings has Privacy (the remote image allowlist) and Sync and storage. Invariant 7 asks for a Clear body cache action. No command lists or removes allowlisted senders, and none clears the body cache.
 
 Options:
@@ -622,7 +622,7 @@ Options:
 - (b) Pseudo-keys through `settings.get` and `settings.set`; no new commands, but the settings table does not hold these.
 - (c) Privacy lists nothing, and Clear body cache is left out.
 
-## G80. A notification click cannot open its message — Open (blocks part of M10 notifications)
+## G80. A notification click cannot open its message — Resolved 2026-10-21: option (a), focus and open the newest
 Section 11: "Click focuses the app on that message." The official notification plugin, the only one allowed, reports clicks on mobile only. On Windows a click on an installed app's toast starts the app again; with single instance (section 11), that focuses the running window.
 
 Options:
@@ -630,11 +630,31 @@ Options:
 - (b) A click only focuses the app.
 - (c) Add a crate that reports Windows toast clicks (outside the section 2 table).
 
-## G81. A taskbar unread count on Windows — Open (blocks part of M10 tray work)
+## G81. A taskbar unread count on Windows — Resolved 2026-10-21: option (a), an overlay dot
 Section 11: "Unread badge on the dock or taskbar where the OS supports it." Tauri's badge count covers macOS and Linux, not Windows. Windows has a taskbar overlay icon, but it is an image, and drawing digits needs an image crate. The window title and tray tooltip show the count either way (section 11).
 
 Options:
 - (a) **Recommended:** on Windows, a small solid dot overlay, drawn in code in the accent color, while anything is unread. The number is in the title and the tray tooltip. macOS and Linux use the badge count (M12).
 - (b) No taskbar badge on Windows; the title and tray only.
 - (c) A numbered overlay from bundled digit images (new image assets).
+
+## G82. M10 details — Resolved by interpretation (owner to ratify)
+- **Settings registry:** `settings.get` and `settings.set` accept only the keys Core lists, each with a type, allowed values and default: `ui.theme` (system, light, dark), `ui.density` (comfortable, compact), `ui.reading_pane` (right, bottom, off), `ui.group_by_thread` (on), `reading.mark_read` (delay, immediately, never), `reading.html` (on), `compose.undo_seconds` (0 to 30, default 10), `notify.preview` (off), `notify.accounts.<id>` (on), `app.keep_in_tray` (on), `app.autostart` (off), `privacy.online_lookups` (on), `debug_logging` (off, applied at once), `threads.subject_merge` (off), `snooze.folder` (Snoozed), `snooze.end_on_reply` (on). Anything else is `invalid_input`; `get` answers the default for a key never set. Subject grouping applies to mail threaded after the change.
+- **The `notify` payload** carries, beyond the section 3 fields, `preview` (only with the preview setting on), `count` and `account_name`: a count above 1 is the coalesced "N new messages in <account>", and `message_id` is then the newest of them.
+- **Which messages notify:** new mail in INBOX or a watched folder (never a first sync, never a message this app moved there, G77), after mute and the rules: still unread and visible, no Never notify rule, INTERNALDATE within 30 minutes, notifications on for the account. A message whose rules wait for its body notifies once they ran. With the preview on, a notification waits up to 5 s for the body.
+- **Coalescing:** per account, the first 3 in a 10 s window show one by one. A batch that would pass 3 shows at once as one "N new messages"; what arrives later in that window waits for the window's end and shows as one more. A steady stream shows one notification per 10 s.
+- **Where notifications show:** Core decides and emits `notify`; the app shows the OS notification only while the main window is unfocused or hidden. The few strings the OS shows outside the page (tray menu, tooltip, window title, the coalesced text) live in `src-tauri/src/strings.rs`.
+- **Notification click (G80):** the page remembers the newest notification that arrived while it was in the background; when the window comes to the front within 10 s, it opens that message, or the account's INBOX for a coalesced one, once.
+- **Unread count:** unread INBOX messages of enabled accounts, each Gmail message once. Title `Zero Mail (N)`, tooltip `Zero Mail: N unread`, the Windows dot (G81); macOS and Linux get the badge count through the same call, checked at M12.
+- **Tray and closing:** a left click on the tray icon opens the window; Compose opens a draft on the first enabled account. With Keep running in tray off, closing the main window quits. Autostart is applied when the setting changes.
+- **Shortcuts:** single keys do nothing while the focus is in a text field, a select or an editable area; Ctrl/Cmd combinations and Esc stay active (Ctrl+Enter sends from the body). `g` waits 1.5 s for its second key. With the reading pane on, a selected message already shows, so Enter and `o` open a message in its own view only with the pane off. Esc closes the lightbox, then Settings, then the full view, then deselects.
+- **Reading pane off:** a click (or Enter, `o`) opens the message in its own view, with Back to the list; Esc returns.
+- **Print (18.8):** the page lays out a print view off screen (a header block with subject, from, to, cc and date above each body, a thread oldest first) and calls `message.print`, which checks the message or thread exists; the app then opens the webview's print dialog. Bodies come from `mail-body` with `images=1` only where images were already allowed. On paper only the print view shows.
+- **Image preview (18.9):** the lightbox loads `mail-cid://localhost/<message>/attachment/<id>`. Core serves it only for an attachment of that message, `image/*` and at most 20 MB, with the same `default-src 'none'` response CSP as inline images.
+- **Unsubscribe (18.7):** the first `https:` and the first `mailto:` URI in `List-Unsubscribe` count; one-click needs an `https:` URI and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. The POST goes through the approved HTTP client (HTTPS only, no cookie store, no referrer, 3 redirects at most); a 2xx answer is success, anything else `server_rejected`. A `mailto:` draft takes the URI's subject and body; with no subject it is `unsubscribe`. An `https:` page opens in the system browser through the same check as `link.open`. The reader shows Unsubscribe only when a method exists, and asks first.
+- **Settings screens:** Accounts lists each account with On and Edit; for a Gmail account it links Gmail's own filter, vacation, forwarding, spam, 2-Step Verification and storage pages (section 18 table, server-side). Signatures are edited as plain text; the HTML part is that text escaped, saved through `account.update` without a new connection test. Templates can be renamed and their subject changed; the body is made in compose (Save as template) and shown read-only. The sync window length is not editable (`account.update` has no `sync_days`); Load older messages extends it. Debug logging and Open log are under Sync and storage. The sidebar's Settings item has no icon: no fitting icon is among the bundled Phosphor paths.
+- **Onboarding:** with no account, a welcome step comes before the add-account form.
+- **Clear body cache** also deletes every cached attachment file and sends `store-changed` for each account.
+- **T35 in CI:** `tests/shell/single-instance.mjs` starts the release build twice in CI's Windows job. The running instance writes `ready` and `focused` to the file named by `ZEROMAIL_INSTANCE_OUT`, a test-only hook like the perf harness's.
+- **Store API:** the message record now carries its list preview, for the notification preview.
 

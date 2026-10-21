@@ -19,3 +19,8 @@ tauri.workspace = true
 # Used from Rust only: the page gets no plugin permission (section 13.3; SPEC_GAPS G52, G54).
 tauri-plugin-opener.workspace = true
 tauri-plugin-dialog.workspace = true
+# Notifications, a second launch focusing the first, and autostart (section 11), from Rust
+# only as well.
+tauri-plugin-notification.workspace = true
+tauri-plugin-single-instance.workspace = true
+tauri-plugin-autostart.workspace = true

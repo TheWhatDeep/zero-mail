@@ -53,7 +53,8 @@ keyring = { version = "4.2.0" }
 oauth2 = { version = "5.0.0", default-features = false }
 thiserror = { version = "2.0.21" }
 tracing = { version = "0.1.44" }
-tauri = { version = "2.12.4" }
+# tray-icon: the tray menu and tooltip (section 11).
+tauri = { version = "2.12.4", features = ["tray-icon"] }
 tauri-build = { version = "2.7.3" }
 tauri-plugin-notification = { version = "2.7.0" }
 tauri-plugin-opener = { version = "2.7.2" }

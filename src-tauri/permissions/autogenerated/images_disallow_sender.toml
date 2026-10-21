@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-images-disallow-sender"
+description = "Enables the images_disallow_sender command without any pre-configured scope."
+commands.allow = ["images_disallow_sender"]
+
+[[permission]]
+identifier = "deny-images-disallow-sender"
+description = "Denies the images_disallow_sender command without any pre-configured scope."
+commands.deny = ["images_disallow_sender"]

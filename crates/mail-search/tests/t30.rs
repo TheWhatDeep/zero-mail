@@ -48,6 +48,8 @@ fn message(n: u32, thread: ThreadId) -> NewMessage {
         refs: None,
         gm_labels: None,
         list_id: None,
+        list_unsubscribe: None,
+        list_unsubscribe_post: None,
         thread_id: thread,
         subject: if s.budget {
             format!("Quarterly budget review {n}")

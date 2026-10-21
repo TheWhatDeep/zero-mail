@@ -86,6 +86,14 @@ pub(crate) fn new_message(
         list_id: header
             .and_then(|m| m.header_raw("List-Id"))
             .and_then(list_id),
+        list_unsubscribe: header
+            .and_then(|m| m.header_raw("List-Unsubscribe"))
+            .map(unfold)
+            .filter(|v| !v.is_empty()),
+        list_unsubscribe_post: header
+            .and_then(|m| m.header_raw("List-Unsubscribe-Post"))
+            .map(unfold)
+            .filter(|v| !v.is_empty()),
         thread_id: 0,
         subject: header
             .and_then(|m| m.subject())
@@ -116,6 +124,11 @@ fn list_id(raw: &str) -> Option<String> {
     };
     let id = id.trim().to_lowercase();
     (!id.is_empty()).then_some(id)
+}
+
+/// A raw header value on one line, whitespace collapsed.
+fn unfold(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn bare_id(id: &str) -> String {

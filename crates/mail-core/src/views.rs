@@ -362,6 +362,8 @@ pub struct MessageView {
     pub muted: bool,
     /// When a snoozed message comes back, UTC (section 18.2); the reader offers Unsnooze.
     pub snoozed_until: Option<i64>,
+    /// How Unsubscribe would act, when `List-Unsubscribe` is present (section 18.7).
+    pub unsubscribe: Option<crate::unsubscribe::Method>,
 }
 
 /// A folder's display name: Inbox, or the last segment of its path.
@@ -431,6 +433,7 @@ pub fn message_view(
         thread_id: m.thread_id,
         muted: false,
         snoozed_until: None,
+        unsubscribe: None,
     }
 }
 

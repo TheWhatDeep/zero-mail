@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-unsubscribe"
+description = "Enables the message_unsubscribe command without any pre-configured scope."
+commands.allow = ["message_unsubscribe"]
+
+[[permission]]
+identifier = "deny-message-unsubscribe"
+description = "Denies the message_unsubscribe command without any pre-configured scope."
+commands.deny = ["message_unsubscribe"]

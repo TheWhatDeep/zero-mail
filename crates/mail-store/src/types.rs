@@ -493,6 +493,9 @@ pub struct NewMessage {
     pub gm_labels: Option<Vec<String>>,
     /// The List-Id header, for rules (SPEC_GAPS G76).
     pub list_id: Option<String>,
+    /// The List-Unsubscribe and List-Unsubscribe-Post headers (section 18.7; G78).
+    pub list_unsubscribe: Option<String>,
+    pub list_unsubscribe_post: Option<String>,
     pub thread_id: ThreadId,
     pub subject: String,
     pub from: Address,
@@ -544,6 +547,8 @@ pub struct MessageRecord {
     pub flags: Flags,
     pub has_attach: bool,
     pub body_state: BodyState,
+    /// The list preview (section 8): 140 characters of plain text.
+    pub preview: String,
 }
 
 /// One message row in a list (section 11, middle pane).

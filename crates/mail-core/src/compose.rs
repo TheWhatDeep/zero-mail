@@ -297,7 +297,7 @@ where
         Ok(own)
     }
 
-    async fn new_draft(
+    pub(crate) async fn new_draft(
         &self,
         account_id: AccountId,
         mut content: DraftContent,
@@ -816,7 +816,7 @@ where
             .map_err(|e| AppError::new(ErrorCode::Internal, e.to_string()))?;
         let now = crate::accounts::now();
         self.store.update_draft(draft_id, value, now).await?;
-        let window = i64::try_from(self.timing().undo_window.as_secs()).unwrap_or(10);
+        let window = self.undo_seconds().await;
         let mut recipients: Vec<Value> = Vec::new();
         for a in content.to.iter().chain(&content.cc).chain(&content.bcc) {
             recipients.push(json!([a.addr, a.name]));
