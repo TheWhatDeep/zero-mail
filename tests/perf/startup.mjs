@@ -75,9 +75,27 @@ function once({ scroll }) {
 
 const median = (xs) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 
-const warmup = await once({ scroll: false });
+/** A failure, also as a GitHub annotation in CI (readable without signing in to the logs). */
+function report(message) {
+  console.error(message);
+  if (process.env.GITHUB_ACTIONS) {
+    console.log(`::error title=startup harness::${message.replace(/%/g, "%25").replace(/\r?\n/g, "%0A")}`);
+  }
+}
+
+/** A launch that fails says which one it was. */
+async function launch(what, opts) {
+  try {
+    return await once(opts);
+  } catch (err) {
+    report(`${what}: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+const warmup = await launch("warm-up launch", { scroll: false });
 const samples = [];
-for (let i = 0; i < runs; i++) samples.push(await once({ scroll: false }));
+for (let i = 0; i < runs; i++) samples.push(await launch(`launch ${i + 1} of ${runs}`, { scroll: false }));
 const result = {
   date: new Date().toISOString(),
   platform: `${process.platform}-${process.arch}`,
@@ -90,7 +108,7 @@ const result = {
   samples: samples.map((s) => ({ startup_ms: s.startup_ms, wall_ms: s.wall_ms, ui_ms: s.ui?.ui_ms })),
 };
 if (has("--scroll")) {
-  const s = await once({ scroll: true });
+  const s = await launch("scroll launch", { scroll: true });
   result.scroll = { ...s.scroll, fps_budget: FPS_BUDGET, dom_rows_budget: DOM_ROWS_BUDGET };
 }
 
@@ -100,15 +118,17 @@ console.log(JSON.stringify(result, null, 2));
 
 let failed = false;
 if (has("--enforce") && result.median_startup_ms > BUDGET_MS) {
-  console.error(`Startup median ${result.median_startup_ms} ms exceeds the ${BUDGET_MS} ms budget`);
+  report(
+    `Startup median ${result.median_startup_ms} ms exceeds the ${BUDGET_MS} ms budget; samples ${JSON.stringify(result.samples)}`,
+  );
   failed = true;
 }
 if (result.scroll && result.scroll.max_dom_rows > DOM_ROWS_BUDGET) {
-  console.error(`${result.scroll.max_dom_rows} list rows were in the DOM; the budget is ${DOM_ROWS_BUDGET}`);
+  report(`${result.scroll.max_dom_rows} list rows were in the DOM; the budget is ${DOM_ROWS_BUDGET}`);
   failed = true;
 }
 if (has("--enforce-scroll") && result.scroll && result.scroll.fps < FPS_BUDGET * FPS_TOLERANCE) {
-  console.error(`Scrolling ran at ${result.scroll.fps} fps; the budget is ${FPS_BUDGET}`);
+  report(`Scrolling ran at ${result.scroll.fps} fps; the budget is ${FPS_BUDGET}`);
   failed = true;
 }
 if (failed) process.exit(1);

@@ -83,7 +83,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --workspace 2>&1 | tee test.log || {
-            grep -E "^test .* FAILED$|panicked at|^thread '.*' .*panicked" -A3 test.log | head -40 | sed 's/^/::error title=cargo test::/'
+            node scripts/annotate-test-failures.mjs test.log
             exit 1
           }
 

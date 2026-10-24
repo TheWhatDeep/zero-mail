@@ -338,14 +338,11 @@ async fn t07_a_kill_between_batches_resumes_without_duplicates() {
         (1..=350).collect::<Vec<_>>()
     );
     store.integrity_check().await.unwrap();
-    let fts_ok = dir
-        .raw()
-        .execute(
-            "INSERT INTO message_fts(message_fts, rank) VALUES ('integrity-check', 1)",
-            [],
-        )
-        .is_ok();
-    assert!(fts_ok, "FTS index agrees with its content");
+    let fts = dir.raw().execute(
+        "INSERT INTO message_fts(message_fts, rank) VALUES ('integrity-check', 1)",
+        [],
+    );
+    assert!(fts.is_ok(), "FTS index agrees with its content: {fts:?}");
     handle.shutdown().await;
 }
 
