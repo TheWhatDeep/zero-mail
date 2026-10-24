@@ -115,6 +115,11 @@ if (has("--scroll")) {
 mkdirSync(join(ROOT, "tests", "perf", "results"), { recursive: true });
 writeFileSync(join(ROOT, "tests", "perf", "results", "startup.json"), JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));
+// Every run's numbers as an annotation too: the artifact needs a sign-in, annotations do not.
+if (process.env.GITHUB_ACTIONS) {
+  const line = `Startup median ${result.median_startup_ms} ms (budget ${BUDGET_MS}); warm-up ${JSON.stringify(result.warmup_discarded)}; samples ${JSON.stringify(result.samples)}`;
+  console.log(`::notice title=startup harness::${line.replace(/%/g, "%25")}`);
+}
 
 let failed = false;
 if (has("--enforce") && result.median_startup_ms > BUDGET_MS) {
