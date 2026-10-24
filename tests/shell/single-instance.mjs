@@ -36,16 +36,38 @@ async function until(what, check) {
   }
 }
 
+/** What each process printed, for the failure report. */
+const output = { first: "", second: "" };
+function launch(which) {
+  const child = spawn(binary, [], { env, stdio: ["ignore", "pipe", "pipe"] });
+  const keep = (chunk) => (output[which] = (output[which] + chunk.toString()).slice(-2000));
+  child.stdout.on("data", keep);
+  child.stderr.on("data", keep);
+  return child;
+}
+
+/** A failure, also as a GitHub annotation in CI (readable without signing in to the logs). */
+function report(message) {
+  console.error(message);
+  if (process.env.GITHUB_ACTIONS) {
+    console.log(`::error title=T35::${message.replace(/%/g, "%25").replace(/\r?\n/g, "%0A")}`);
+  }
+}
+
 let first;
 let failed = false;
+let firstCode = null;
 try {
-  first = spawn(binary, [], { env, stdio: "ignore" });
+  first = launch("first");
   let firstExited = false;
-  first.on("exit", () => (firstExited = true));
+  first.on("exit", (code) => {
+    firstExited = true;
+    firstCode = code;
+  });
   await until("the first instance is ready", () => lines().includes("ready") || firstExited);
-  if (firstExited) throw new Error("the first instance exited on its own");
+  if (firstExited) throw new Error(`the first instance exited on its own (code ${firstCode})`);
 
-  const second = spawn(binary, [], { env, stdio: "ignore" });
+  const second = launch("second");
   let secondExit = null;
   second.on("exit", (code) => (secondExit = code ?? -1));
   await until("the second launch exits", () => secondExit !== null);
@@ -57,7 +79,10 @@ try {
   }
   console.log(`T35 passed: the second launch exited (code ${secondExit}) and focused the first`);
 } catch (err) {
-  console.error(`T35 failed: ${err.message}`);
+  report(
+    `T35 failed: ${err.message}\nnotes: ${lines().join(", ") || "(none)"}\n` +
+      `first instance output:\n${output.first || "(none)"}\nsecond instance output:\n${output.second || "(none)"}`,
+  );
   failed = true;
 } finally {
   if (first && first.exitCode === null) first.kill();
