@@ -825,11 +825,11 @@ None from spec v0.19. v0.19 records the owner's decisions G74 to G76.
   - T38 saw an item marked `sent` before its `sent_at` was written, which was a second write. `sent_at` is now set in the same statement that marks the item sent.
   - `npm audit` reported a high-severity advisory in vite 8.3.0 to 8.3.2 (its dev server's `launch-editor`). The UI's pin moved to vite 8.3.4, the fixed patch release.
 
-## M10: done, tagged `m10` (2026-10-21)
+## M10: done, tagged `m10` (2026-10-24)
 
 Scope: notifications, tray, shortcuts, settings, onboarding, single instance, unsubscribe, print and image preview. Done when: T05 (notification part), T34, T35, T43 and T44.
 
-Every check below passes locally on Windows 10. CI: see the run linked in the commit after this report. T35 starts the app, so it runs only in CI (never on the owner's desktop).
+Every check below passes locally on Windows 10. CI: see the run linked in the commit after this report. T35 starts the app, so it runs only in CI (never on the owner's desktop). The first push (060f840) did not pass CI; what CI found and how it was fixed is under Found by CI below.
 
 ### Built
 - **Spec v0.20 (G78 to G81):**
@@ -907,4 +907,11 @@ None from spec v0.20. v0.20 records the owner's decisions G78 to G81.
   - onboarding;
   - the T35 hook.
 - **Not automated, for the owner's manual round (G25):** the OS toast and its click, the tray menu, the taskbar dot, autostart, keyboard triage in the real app, and the printed page. They are listed in `docs/MANUAL_TESTS.md`.
+- **Found by CI after the first push (060f840), all fixed before the tag:**
+  - **The release app crashed at startup** (T35 caught it; exit 101): `Core::watch_unread` started its task with `tokio::spawn`, but the app calls it from Tauri's setup hook on the main thread, outside any runtime. It now spawns on the runtime the core started on. The unread-count test now calls it from a thread outside any runtime; it fails on the old code with the same panic.
+  - **t07 raced the resumed prefetch** (sync.rs, M3): its raw-connection FTS5 integrity check ran while the store's writer was still storing bodies (24 of 200 at that moment, measured locally). FTS5's check on another connection can report corruption during index writes (mail-store `tests/fts_concurrency.rs`). The same failure occurred once before, on aefc7cf (M8). The checks now run once the newest 200 have their bodies; both checks are unchanged.
+  - **RUSTSEC-2026-0385** (published 2026-10-23) in ctutils 0.4.3, a transitive dependency: updated to 0.4.5.
+  - **Unreadable CI failures:** GitHub keeps 10 annotations per step, so most panics were hidden. CI now reports one annotation per failed test with its whole panic, and the startup harness and T35 report their failures the same way.
+  - **Not reproduced:** t01 and opening an uncached message failed in the same 060f840 run as t07, with their panic text cut off. They passed in both CI runs since (b6815fe, e051e5b) and in every local run, so their cause is not confirmed. Both wait up to 20 s for the 200-body prefetch, which commits one fsync'd transaction per body. If they fail again, CI now shows their panics.
+  - **The startup harness failure on 246a20e** (the M9 report commit, code identical to the green f80ca1c) left no readable message; the harness now reports which launch failed and its timings.
 

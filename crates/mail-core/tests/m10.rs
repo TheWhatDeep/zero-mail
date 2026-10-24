@@ -576,7 +576,11 @@ async fn unread_count_for_title_tray_and_badge() {
 
     let shown: Arc<Mutex<Vec<u32>>> = Arc::default();
     let log = Arc::clone(&shown);
-    s.core.watch_unread(move |n| log.lock().unwrap().push(n));
+    // The app calls this from its setup hook on the main thread, outside any runtime.
+    let core = Arc::clone(&s.core);
+    std::thread::spawn(move || core.watch_unread(move |n| log.lock().unwrap().push(n)))
+        .join()
+        .expect("watch_unread outside a runtime");
     // Only INBOX counts.
     wait_for("2 unread", async || {
         shown.lock().unwrap().last() == Some(&2)

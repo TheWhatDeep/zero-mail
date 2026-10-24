@@ -231,6 +231,9 @@ pub struct Core<I, S, H> {
     pub(crate) upload_timers: Mutex<HashMap<mail_store::DraftId, tokio::task::JoinHandle<()>>>,
     /// Wakes the unread watcher (section 11).
     unread_wake: Arc<tokio::sync::Notify>,
+    /// The runtime the core started on, for tasks started from outside it (the app's
+    /// setup hook runs on the main thread, not on a runtime).
+    runtime: tokio::runtime::Handle,
     /// Wakes the outbox runner when something is queued.
     pub(crate) outbox_wake: Arc<tokio::sync::Notify>,
     /// This core, for tasks that call back into it.
@@ -372,6 +375,7 @@ where
             notice_timer: Mutex::default(),
             outbox_wake: Arc::default(),
             unread_wake,
+            runtime: tokio::runtime::Handle::current(),
             me: std::sync::OnceLock::new(),
             store,
             deps,
@@ -757,11 +761,12 @@ where
     }
 
     /// Calls `show` with the unread total now and after every change that can move it,
-    /// at most every [`UNREAD_DELAY`], until shutdown.
+    /// at most every [`UNREAD_DELAY`], until shutdown. Callable from any thread: the task
+    /// runs on the core's runtime.
     pub fn watch_unread(&self, show: impl Fn(u32) + Send + Sync + 'static) {
         let store = self.store.clone();
         let wake = Arc::clone(&self.unread_wake);
-        let task = tokio::spawn(async move {
+        let task = self.runtime.spawn(async move {
             let mut last = None;
             loop {
                 tokio::time::sleep(UNREAD_DELAY).await;

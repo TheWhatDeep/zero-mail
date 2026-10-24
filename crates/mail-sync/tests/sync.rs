@@ -337,6 +337,16 @@ async fn t07_a_kill_between_batches_resumes_without_duplicates() {
         store.cached_uids(inbox).await.unwrap(),
         (1..=350).collect::<Vec<_>>()
     );
+    // FTS5's check on a connection other than the store's writer can report corruption
+    // while the writer changes the index (mail-store tests/fts_concurrency.rs), so the
+    // checks wait for the resumed sync to finish its prefetch: the newest 200 have bodies.
+    eventually(|| {
+        dir.count(
+            "SELECT count(*) FROM (SELECT body_state FROM messages
+             ORDER BY date_utc DESC, id DESC LIMIT 200) WHERE body_state = 'none'",
+        ) == 0
+    })
+    .await;
     store.integrity_check().await.unwrap();
     let fts = dir.raw().execute(
         "INSERT INTO message_fts(message_fts, rank) VALUES ('integrity-check', 1)",
