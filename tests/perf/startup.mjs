@@ -101,11 +101,11 @@ const result = {
   platform: `${process.platform}-${process.arch}`,
   measure: "cold app, warm OS: launch to the first cached inbox rows (SPEC_GAPS G44)",
   runs,
-  warmup_discarded: { startup_ms: warmup.startup_ms, wall_ms: warmup.wall_ms },
+  warmup_discarded: { startup_ms: warmup.startup_ms, wall_ms: warmup.wall_ms, phases: warmup.phases },
   median_startup_ms: median(samples.map((s) => s.startup_ms)),
   median_wall_ms: median(samples.map((s) => s.wall_ms)),
   budget_ms: BUDGET_MS,
-  samples: samples.map((s) => ({ startup_ms: s.startup_ms, wall_ms: s.wall_ms, ui_ms: s.ui?.ui_ms })),
+  samples: samples.map((s) => ({ startup_ms: s.startup_ms, wall_ms: s.wall_ms, ui_ms: s.ui?.ui_ms, phases: s.phases })),
 };
 if (has("--scroll")) {
   const s = await launch("scroll launch", { scroll: true });
@@ -119,7 +119,7 @@ console.log(JSON.stringify(result, null, 2));
 let failed = false;
 if (has("--enforce") && result.median_startup_ms > BUDGET_MS) {
   report(
-    `Startup median ${result.median_startup_ms} ms exceeds the ${BUDGET_MS} ms budget; samples ${JSON.stringify(result.samples)}`,
+    `Startup median ${result.median_startup_ms} ms exceeds the ${BUDGET_MS} ms budget; warm-up ${JSON.stringify(result.warmup_discarded)}; samples ${JSON.stringify(result.samples)}`,
   );
   failed = true;
 }

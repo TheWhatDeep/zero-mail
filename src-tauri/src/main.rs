@@ -112,6 +112,42 @@ const DATA_DIR_ENV: &str = "ZEROMAIL_DATA_DIR";
 /// when started and `focused` when a second launch hands over to it.
 const INSTANCE_OUT_ENV: &str = "ZEROMAIL_INSTANCE_OUT";
 
+/// Perf mode: when each startup phase finished, in ms since `main` began, for the harness's
+/// report (section 14; which part of startup takes the time).
+#[derive(Default)]
+pub(crate) struct Phases {
+    started: std::sync::OnceLock<Instant>,
+    marks: Mutex<Vec<(&'static str, u128)>>,
+}
+
+impl Phases {
+    /// Records a phase once; later marks of the same name are ignored.
+    pub(crate) fn mark(&self, name: &'static str) {
+        let (Some(started), Ok(mut marks)) = (self.started.get(), self.marks.lock()) else {
+            return;
+        };
+        if !marks.iter().any(|(n, _)| *n == name) {
+            marks.push((name, started.elapsed().as_millis()));
+        }
+    }
+
+    fn json(&self) -> String {
+        let marks = self.marks.lock().map(|m| m.clone()).unwrap_or_default();
+        let body: Vec<String> = marks
+            .iter()
+            .map(|(n, ms)| format!("\"{n}\":{ms}"))
+            .collect();
+        format!("{{{}}}", body.join(","))
+    }
+}
+
+/// Records a startup phase in perf mode (no-op otherwise).
+pub(crate) fn phase(app: &AppHandle, name: &'static str) {
+    if let Some(p) = app.try_state::<Phases>() {
+        p.mark(name);
+    }
+}
+
 /// Appends one line to the T35 harness file, when there is one.
 fn instance_note(line: &str) {
     use std::io::Write as _;
@@ -911,7 +947,12 @@ fn perf_hooks(app: &tauri::App, started: Instant) -> tauri::Result<()> {
         } else if scroll {
             let _ = handle.emit("zeromail-perf-scroll", ());
         } else {
-            let json = format!("{{\"startup_ms\":{ms},\"ui\":{}}}\n", event.payload());
+            phase(&handle, "page_ready");
+            let phases = handle.state::<Phases>().json();
+            let json = format!(
+                "{{\"startup_ms\":{ms},\"ui\":{},\"phases\":{phases}}}\n",
+                event.payload()
+            );
             if std::fs::write(&out_ready, json).is_err() {
                 eprintln!("perf: could not write the result");
             }
@@ -954,6 +995,12 @@ fn main() {
             None,
         ))
         .setup(move |app| {
+            if std::env::var_os(PERF_OUT_ENV).is_some() {
+                let phases = Phases::default();
+                let _ = phases.started.set(started);
+                app.manage(phases);
+            }
+            phase(app.handle(), "setup_begin");
             let dir = data_dir(app)?;
             mail_core::logging::init(&dir).map_err(os_error)?;
             let handle = app.handle().clone();
@@ -971,6 +1018,7 @@ fn main() {
                 },
                 sink,
             ))?;
+            phase(app.handle(), "core_started");
             let keep_in_tray = tauri::async_runtime::block_on(
                 core.settings_get(mail_core::settings::KEEP_IN_TRAY),
             )?;
@@ -978,6 +1026,7 @@ fn main() {
             app.manage(Closing::default());
             app.manage(shell::Shell::new(keep_in_tray.as_bool() == Some(true)));
             shell::setup(app)?;
+            phase(app.handle(), "shell_ready");
             perf_hooks(app, started)?;
             instance_note("ready");
             Ok(())

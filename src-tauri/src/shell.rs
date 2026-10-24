@@ -156,6 +156,7 @@ pub fn on_event(app: &AppHandle, event: &CoreEvent) {
 
 /// The unread count in the title, the tray tooltip and the taskbar (section 11; G81).
 fn show_count(app: &AppHandle, unread: u32) {
+    crate::phase(app, "first_count_begin");
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.set_title(&strings::title(unread));
         #[cfg(windows)]
@@ -170,6 +171,7 @@ fn show_count(app: &AppHandle, unread: u32) {
     if let Some(tray) = app.tray_by_id(TRAY) {
         let _ = tray.set_tooltip(Some(strings::tooltip(unread)));
     }
+    crate::phase(app, "first_count_shown");
 }
 
 /// A solid accent dot with a soft edge, drawn in code (SPEC_GAPS G81).
